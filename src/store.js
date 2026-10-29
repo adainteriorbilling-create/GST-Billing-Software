@@ -207,8 +207,23 @@ export const getAllBills = async () => {
   return apiFetch(`${API}/bills`);
 };
 
-export const deleteBill = async (id) => {
-  return apiFetch(`${API}/bills/${encodeURIComponent(id)}`, { method: 'DELETE' });
+// Deleting an invoice also gives back the client advance it used (see
+// releaseClientAdvance). keepAdvance: true is for a rename, where the same
+// invoice lives on under a new number and keeps its advance.
+export const deleteBill = async (id, { keepAdvance = false } = {}) => {
+  let bill = null;
+  if (!keepAdvance) {
+    try { bill = (await getAllBills()).find((b) => b.id === id) || null; } catch { /* the delete itself still goes ahead */ }
+  }
+  const res = await apiFetch(`${API}/bills/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  let advanceReleased = 0;
+  if (bill?.clientName) {
+    try {
+      const r = await releaseClientAdvance({ clientName: bill.clientName, billId: bill.id, reason: 'invoice deleted' });
+      advanceReleased = r.released;
+    } catch (err) { console.error('Client advance could not be given back after delete:', err); }
+  }
+  return { ...res, advanceReleased };
 };
 
 // v1.9.5 — Automatic backups + trash bin
@@ -223,7 +238,19 @@ export const deleteBackup = async (date) => apiFetch(`${API}/backups/${encodeURI
 export const getBackupFolder = async () => apiFetch(`${API}/backup-folder`);
 export const setBackupFolder = async (folder) => apiFetch(`${API}/backup-folder`, { method: 'POST', body: JSON.stringify({ path: folder }) });
 export const getTrashedBills = async () => apiFetch(`${API}/trash`);
-export const restoreTrashedBill = async (id) => apiFetch(`${API}/trash/${encodeURIComponent(id)}/restore`, { method: 'POST', body: JSON.stringify({}) });
+export const restoreTrashedBill = async (id) => {
+  let bill = null;
+  try { bill = (await getTrashedBills()).find((b) => b.id === id) || null; } catch { /* restore still goes ahead */ }
+  const res = await apiFetch(`${API}/trash/${encodeURIComponent(id)}/restore`, { method: 'POST', body: JSON.stringify({}) });
+  // A bill that was cancelled before it was deleted had its advance given back
+  // then, so it stays given back. Otherwise the advance goes on again (once).
+  let advanceApplied = 0;
+  if (bill && bill.status !== 'cancelled') {
+    try { advanceApplied = (await reapplyClientAdvance({ bill })).applied; }
+    catch (err) { console.error('Client advance could not be put back after restore:', err); }
+  }
+  return { ...res, advanceApplied };
+};
 export const purgeTrashedBill = async (id) => apiFetch(`${API}/trash/${encodeURIComponent(id)}`, { method: 'DELETE' });
 
 // ---- Profile ----
@@ -698,4 +725,58 @@ export async function reapplyClientAdvance({ bill, amount }) {
   });
   const applied = record ? round2(sumApplied(record.advanceApplied) - sumApplied(had?.advanceApplied)) : 0;
   return { client: record, applied };
+}
+
+// An invoice was edited and now owes less than the advance on it: keep only
+// `newAmount` of its advance and give the rest back. Never raises an advance.
+export async function adjustClientAdvance({ clientName, billId, newAmount, reason = 'invoice edited' }) {
+  const lower = String(clientName || '').trim().toLowerCase();
+  const key = String(billId || '');
+  if (!lower || !key) return { client: null, released: 0 };
+  const all = await getAllClients();
+  const client = all.find((c) => String(c.name || '').trim().toLowerCase() === lower);
+  if (!client) return { client: null, released: 0 };
+  const mine = (client.advanceApplied || []).filter((a) => String(a.billId || a.invoiceNumber || '') === key);
+  const have = sumApplied(mine);
+  const keep = Math.max(0, round2(newAmount));
+  if (mine.length === 0 || have <= keep + 0.005) return { client, released: 0 };
+  const at = new Date().toISOString();
+  let room = keep;
+  const kept = [];
+  const given = [];
+  for (const a of mine) {
+    const amt = Number(a.amount) || 0;
+    const stay = Math.min(amt, room);
+    room = round2(room - stay);
+    if (stay > 0.005) kept.push({ ...a, amount: round2(stay) });
+    if (amt - stay > 0.005) given.push({ ...a, amount: round2(amt - stay), releasedAt: at, reason });
+  }
+  const record = {
+    ...client,
+    advanceApplied: [...(client.advanceApplied || []).filter((a) => !mine.includes(a)), ...kept],
+    advanceReleased: [...(client.advanceReleased || []), ...given],
+  };
+  record.creditBalance = advanceBalanceOf(record);
+  await saveClient(record);
+  return { client: record, released: round2(have - sumApplied(kept)) };
+}
+
+// An invoice was renumbered: its advance entry follows the new number, so a
+// later cancel or delete finds it. Nothing is taken or given back.
+export async function moveClientAdvance({ clientName, fromId, toId }) {
+  const lower = String(clientName || '').trim().toLowerCase();
+  if (!lower || !fromId || !toId || fromId === toId) return null;
+  const all = await getAllClients();
+  const client = all.find((c) => String(c.name || '').trim().toLowerCase() === lower);
+  if (!client) return null;
+  let changed = false;
+  const advanceApplied = (client.advanceApplied || []).map((a) => {
+    if (String(a.billId || a.invoiceNumber || '') !== String(fromId)) return a;
+    changed = true;
+    return { ...a, billId: toId, invoiceNumber: toId };
+  });
+  if (!changed) return client;
+  const record = { ...client, advanceApplied };
+  await saveClient(record);
+  return record;
 }
