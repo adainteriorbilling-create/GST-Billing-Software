@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback, useMemo, memo } from 'react';
 import { ArrowLeft, Plus, Trash2, Download, UserPlus, Pencil, Settings, ChevronUp, ChevronDown, MessageCircle, Check, Loader, Truck, Printer, Eye, EyeOff } from 'lucide-react';
 import { jsPDF } from 'jspdf';
 import html2canvas from 'html2canvas';
-import { saveBill, deleteBill, applyStockChanges, getNextInvoiceNumber, getTermsTemplates, getAllClients, saveClient, getProfile, getAllProducts, getInvoiceDisplayOptions, saveInvoiceDisplayOptions, getAllProfiles, getRegionMode, saveRecurring, getAllRecurring, getAllBills } from '../store';
+import { saveBill, deleteBill, applyStockChanges, getNextInvoiceNumber, getTermsTemplates, getAllClients, saveClient, getProfile, getAllProducts, getInvoiceDisplayOptions, saveInvoiceDisplayOptions, getAllProfiles, getRegionMode, saveRecurring, getAllRecurring, getAllBills, advanceBalanceOf, applyClientAdvance } from '../store';
 import { INVOICE_TYPES, businessKeyOf, GST_DOC_NUMBER, COUNTRIES, printedSubtotal, deliveryChargeLine, stockEffect, appliedStock, stockDelta, generateEWayBillJSON, formatCurrency, getCountryConfig, getStatesForCountry, getAllUnits, addCustomUnit, removeCustomUnit, getCountriesForRegion, TDS_SECTIONS, TCS_SECTIONS, REMOVED_TCS_SECTIONS, TERMS_PRESETS, getActiveAccounts, getDefaultAccount, getAccountById, getDefaultUnitForMode, filterUnitsByMode, PAPER_SIZES, getPaperSize, computeInvoiceTotals, clientYearToDate, htmlHasText, ORDER_DETAIL_FIELDS, invoiceOptionOn, DEFAULT_DECLARATION, decodeGstin, safePageBoundaries, localToday, toLocalIsoDate, parseLocalDate, paymentStatusFor } from '../utils';
 import { getPrintSettings, savePrintSettings } from '../utils/printSettings';
 import { openWhatsAppShare } from '../utils/share';
@@ -1355,14 +1355,23 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
   // A duplicate / conversion is a NEW document, so the bill it was copied from
   // still counts as a credit source. `available` is the FIFO-orderable total;
   // `sources` powers the auditable "from Bill A/2026-27/00X" trail.
+  // Two sources are added together:
+  //   1. overpayments on this client's earlier bills (getClientCredit), and
+  //   2. the advance entered under Clients -> Advance / Credit (client.advances,
+  //      less what earlier invoices already used). This second one was never
+  //      read here, which is why such an advance was not deducted.
   const clientCredit = useMemo(() => {
-    if (!client?.name?.trim()) return { available: 0, sources: [] };
+    if (!client?.name?.trim()) return { available: 0, sources: [], advance: 0, overpaid: 0 };
     const ownBill = editingBill && !editingBill._isDuplicate;
     const otherBills = ownBill
       ? allBillsForCredit.filter(b => b.id !== editingBill.id)
       : allBillsForCredit;
-    return getClientCredit(client.name, otherBills);
-  }, [client?.name, allBillsForCredit, editingBill]);
+    const base = getClientCredit(client.name, otherBills);
+    const lowerName = client.name.trim().toLowerCase();
+    const savedRec = savedClients.find(c => String(c.name || '').trim().toLowerCase() === lowerName);
+    const advance = advanceBalanceOf(savedRec);
+    return { ...base, overpaid: base.available, advance, available: base.available + advance };
+  }, [client?.name, allBillsForCredit, editingBill, savedClients]);
 
   // A different client starts again from automatic.
   useEffect(() => { setCreditOverride(null); }, [client?.name]);
@@ -1713,9 +1722,24 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
     // payment on this bill + `credit-transferred-out` entries on the
     // source overpaid bills. Both are applied inside the try/catch
     // below so a save failure doesn't leave the source bills half-updated.
-    const creditPlan = (isNewDoc && !hasBeenSaved.current && newCredit > 0.005)
-      ? planCreditApplication(client.name, allBillsForCredit, newCredit, finalInvoiceNumber)
+    // The advance is taken first from the client's own advance (Clients ->
+    // Advance / Credit), the rest from overpayments on earlier bills.
+    const advanceAvailNow = (isNewDoc && !hasBeenSaved.current) ? (Number(clientCredit.advance) || 0) : 0;
+    const advancePart = r2(Math.min(newCredit, advanceAvailNow));
+    const overpayPart = r2(newCredit - advancePart);
+    const creditPlan = (isNewDoc && !hasBeenSaved.current && overpayPart > 0.005)
+      ? planCreditApplication(client.name, allBillsForCredit, overpayPart, finalInvoiceNumber)
       : null;
+    const advanceEntry = advancePart > 0.005 ? {
+      id: 'credit_adv_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+      amount: advancePart,
+      date: localToday(),
+      mode: 'credit-applied',
+      note: 'Applied from client advance',
+      recordedAt: new Date().toISOString(),
+      creditSourceBillIds: [],
+      creditFrom: 'client-advance',
+    } : null;
 
     // v1.10.41 — Payment-preservation guard. Reported: user recorded
     // a payment on the Dashboard while an editor tab still had the
@@ -1772,6 +1796,7 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
       } catch { /* non-fatal — reconciliation pass will catch it */ }
     }
     if (creditPlan?.targetEntry) seedPayments.push(creditPlan.targetEntry);
+    if (advanceEntry) seedPayments.push(advanceEntry);
     const seedPaidAmount = seedPayments.reduce((s, p) => s + (Number(p.amount) || 0), 0);
     // v1.10.41 — Recompute status from the merged paid amount rather
     // than trusting editingBill.status. If a payment was recorded on
@@ -1911,11 +1936,15 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
               preferredCustomPaperWidth: nextCustomW,
               preferredCustomPaperHeight: nextCustomH,
             };
-            saveClient(updatedClient).then(() => {
+            // Awaited (was fire-and-forget): the client advance is written right
+            // after this, and a late write of this older client copy would
+            // wipe it.
+            try {
+              await saveClient(updatedClient);
               // Refresh the in-memory clients list so subsequent
               // handleSelectClient calls see the new preference.
               setSavedClients(prev => prev.map(c => c.id === cli.id ? updatedClient : c));
-            }).catch(() => { /* non-blocking */ });
+            } catch { /* non-blocking */ }
           }
         }
       }
@@ -1984,9 +2013,25 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
     }
 
     savedId.current = savedNumber;
+    // Use up the client advance now that the bill is safely saved.
+    if (advanceEntry) {
+      try {
+        const updatedRec = await applyClientAdvance({
+          clientName: client.name, amount: advancePart, billId: savedNumber, invoiceNumber: savedNumber,
+        });
+        if (updatedRec) {
+          setSavedClients(prev => prev.map(c => c.id === updatedRec.id ? updatedRec : c));
+          toast(`${formatCurrency(advancePart, invoiceOptions.currency || 'INR')} advance deducted from ${client.name}'s advance balance`, 'success');
+        }
+      } catch (advErr) {
+        console.error('Client advance update failed:', advErr);
+        toast('Advance is shown on this bill, but the client advance balance could not be updated. Please check Clients > Advance.', 'warning');
+      }
+    }
     // The advance is now part of this saved bill: keep showing it (and stop
     // offering / re-applying credit on later saves).
-    if (creditPlan?.targetEntry) setLockedCredit(creditPlan.amountApplied);
+    const totalCreditApplied = r2((creditPlan?.amountApplied || 0) + advancePart);
+    if (totalCreditApplied > 0.005) setLockedCredit(totalCreditApplied);
     setSavedOnce(true);
     // A rename: the bill now lives under its new number, so the old file goes
     // (to the Trash, from where it can be restored).
@@ -4105,9 +4150,17 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
                   <div>
                     <strong style={{ color: '#0369a1' }}>💳 Advance available: {formatCurrency(clientCredit.available, invoiceOptions.currency || 'INR')}</strong>
                     <span style={{ color: 'var(--text-muted)', marginLeft: 8 }}>
-                      from {clientCredit.sources.length} prior overpayment{clientCredit.sources.length > 1 ? 's' : ''}
-                      {' '}({clientCredit.sources.map(s => s.invoiceNumber).slice(0, 3).join(', ')}
-                      {clientCredit.sources.length > 3 ? '…' : ''})
+                      {clientCredit.advance > 0.005 && (
+                        <>client advance {formatCurrency(clientCredit.advance, invoiceOptions.currency || 'INR')}</>
+                      )}
+                      {clientCredit.advance > 0.005 && clientCredit.sources.length > 0 && ' + '}
+                      {clientCredit.sources.length > 0 && (
+                        <>
+                          from {clientCredit.sources.length} prior overpayment{clientCredit.sources.length > 1 ? 's' : ''}
+                          {' '}({clientCredit.sources.map(s => s.invoiceNumber).slice(0, 3).join(', ')}
+                          {clientCredit.sources.length > 3 ? '…' : ''})
+                        </>
+                      )}
                     </span>
                   </div>
                   <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center' }}>
