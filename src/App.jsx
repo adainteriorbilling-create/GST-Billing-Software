@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useMemo, lazy, Suspense } from 'react';
-import { Home, FileText, Settings, Plus, Users, Package, BarChart3, Wallet, RefreshCw, Receipt, BookOpen, Moon, Sun, Download, X, ShoppingCart, ChevronDown, Building2, Pencil, Search, Command, Bell, Calculator, HardDrive, Menu, History, Eye } from 'lucide-react';
-import { getAllProfiles, saveProfile, getEnabledModules, getAllBills, getAllProducts, getStockAlertSettings, getAllClients, getLockStatus } from './store';
-import { isModuleEnabled, getUpcomingFilings, countsAsSales, localToday, toLocalIsoDate, formatCurrency, amountDue, isCancelledBill } from './utils';
+import { Home, FileText, Settings, Plus, Users, Package, BarChart3, Wallet, RefreshCw, Receipt, BookOpen, Moon, Sun, Download, X, ShoppingCart, ChevronDown, Building2, Pencil, Search, Command, Bell, Calculator, HardDrive, Menu, History, Eye, Trash2 } from 'lucide-react';
+import { getAllProfiles, saveProfile, getEnabledModules, getAllBills, getAllProducts, getStockAlertSettings, getAllClients, getLockStatus, deleteBill, saveBill, applyStockChanges, trashSavedPdf, clientAdvanceUsedOn } from './store';
+import { isModuleEnabled, getUpcomingFilings, countsAsSales, localToday, toLocalIsoDate, formatCurrency, amountDue, isCancelledBill, appliedStock, stockDelta } from './utils';
 import PrintPreviewModal from './components/PrintPreviewModal';
 // v1.10.4 — Route-level lazy loading. Prior App.jsx synchronously
 // imported all 12 views (~15k LOC combined), so a first-paint on
@@ -21,7 +21,7 @@ import Dashboard from './components/Dashboard';
 import InvoiceGenerator from './components/InvoiceGenerator';
 import SetupWizard from './components/SetupWizard';
 import ToastContainer, { toast } from './components/Toast';
-import ConfirmModalContainer from './components/ConfirmModal';
+import ConfirmModalContainer, { confirmAction } from './components/ConfirmModal';
 import WelcomeGuide from './components/WelcomeGuide';
 const SettingsView = lazy(() => import('./components/SettingsView'));
 const ClientsView = lazy(() => import('./components/ClientsView'));
@@ -66,6 +66,11 @@ function InvoiceHistory({ onNew, onEdit, onPrint, onDuplicate }) {
   // View popup: the invoice as it prints, in the same window (no editor, no new tab).
   const [viewBill, setViewBill] = useState(null);
 
+  const reload = () => getAllBills()
+    .then((list) => setBills(Array.isArray(list) ? list : []))
+    .catch(() => setBills([]))
+    .finally(() => setLoading(false));
+
   useEffect(() => {
     let cancelled = false;
     getAllBills()
@@ -74,6 +79,33 @@ function InvoiceHistory({ onNew, onEdit, onPrint, onDuplicate }) {
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, []);
+
+  // Delete: the invoice goes to the Trash (30 days). store.deleteBill gives the
+  // client advance it used back; its stock is put back as on cancel.
+  const handleDelete = async (bill) => {
+    const cur = bill.currency || bill.data?.invoiceOptions?.currency || 'INR';
+    const adv = isCancelledBill(bill) ? 0 : clientAdvanceUsedOn(bill);
+    if (!await confirmAction({
+      title: 'Delete this invoice?',
+      message: `Invoice ${bill.invoiceNumber} for ${bill.clientName || 'No client'} moves to Trash for 30 days (Settings → Backup Management → Trash bin).`
+        + (adv > 0.005 ? ` The ${formatCurrency(adv, cur)} advance it used goes back to ${bill.clientName}'s advance balance.` : ''),
+      confirmLabel: 'Delete',
+      tone: 'danger',
+    })) return;
+    const returned = bill.data ? appliedStock(bill) : {};
+    const moves = Object.keys(returned).length > 0;
+    try {
+      if (moves) await saveBill({ ...bill, data: { ...bill.data, stockApplied: {}, stockReturnedOnDelete: returned } }, { overwrite: true });
+      try { await deleteBill(bill.id); }
+      catch (err) { if (moves) await saveBill(bill, { overwrite: true }).catch(() => {}); throw err; }
+      if (moves) await applyStockChanges(stockDelta(returned, {})).catch(() => toast('Invoice deleted, but its stock could not be put back. Check Products.', 'warning'));
+      trashSavedPdf(bill).catch(() => {});
+      toast('Invoice deleted', 'success');
+      reload();
+    } catch (err) {
+      toast(err?.body?.message || 'Failed to delete', 'error', 8000);
+    }
+  };
 
   const billDate = (b) => b.invoiceDate || b.data?.details?.invoiceDate || b.createdAt || '';
   // Bills are saved with `totalAmount` (older/imported ones may use other names).
@@ -91,6 +123,7 @@ function InvoiceHistory({ onNew, onEdit, onPrint, onDuplicate }) {
   };
   // The advance (client credit) that was deducted when the bill was made.
   const billAdvance = (b) => {
+    if (isCancelledBill(b)) return 0;
     const list = Array.isArray(b.payments) ? b.payments : [];
     const fromPay = list.filter((p) => p?.mode === 'credit-applied').reduce((s, p) => s + (Number(p?.amount) || 0), 0);
     return fromPay || Number(b.data?.appliedCredit) || 0;
@@ -189,7 +222,10 @@ function InvoiceHistory({ onNew, onEdit, onPrint, onDuplicate }) {
                     </button>
                     <button type="button" className="btn btn-secondary" style={{ fontSize: '0.78rem', padding: '0.25rem 0.6rem', marginRight: 4 }} onClick={() => onEdit(b)}>Open</button>
                     <button type="button" className="btn btn-secondary" style={{ fontSize: '0.78rem', padding: '0.25rem 0.6rem', marginRight: 4 }} onClick={() => onPrint(b)}>Print</button>
-                    <button type="button" className="btn btn-secondary" style={{ fontSize: '0.78rem', padding: '0.25rem 0.6rem' }} onClick={() => onDuplicate(b)}>Duplicate</button>
+                    <button type="button" className="btn btn-secondary" style={{ fontSize: '0.78rem', padding: '0.25rem 0.6rem', marginRight: 14 }} onClick={() => onDuplicate(b)}>Duplicate</button>
+                    <button type="button" className="btn btn-secondary" style={{ fontSize: '0.78rem', padding: '0.25rem 0.6rem', color: '#dc2626', borderColor: '#fecaca', display: 'inline-flex', alignItems: 'center', gap: 4 }} onClick={() => handleDelete(b)} title="Delete invoice (moves to Trash)">
+                      <Trash2 size={13} /> Delete
+                    </button>
                   </td>
                 </tr>
               ))}
