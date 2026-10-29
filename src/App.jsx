@@ -207,12 +207,12 @@ function InvoiceHistory({ onNew, onEdit, onPrint, onDuplicate }) {
                   <td style={{ ...td, fontWeight: 600 }}>{b.invoiceNumber || '—'}</td>
                   <td style={td}>{b.clientName || 'No client'}</td>
                   <td style={td}>{fmtDate(billDate(b))}</td>
-                  <td style={{ ...td, textAlign: 'right', fontWeight: 600 }}>{fmtAmt(billAmount(b), b)}</td>
-                  <td style={{ ...td, textAlign: 'right', color: billAdvance(b) > 0.005 ? '#0369a1' : 'var(--text-muted)' }}>
-                    {billAdvance(b) > 0.005 ? '− ' + fmtAmt(billAdvance(b), b) : '—'}
+                  <td style={{ ...td, textAlign: 'right', whiteSpace: 'nowrap', fontWeight: 600 }}>{fmtAmt(billAmount(b), b)}</td>
+                  <td style={{ ...td, textAlign: 'right', whiteSpace: 'nowrap', color: billAdvance(b) > 0.005 ? '#0369a1' : 'var(--text-muted)' }}>
+                    {billAdvance(b) > 0.005 ? fmtAmt(billAdvance(b), b) : '—'}
                   </td>
-                  <td style={{ ...td, textAlign: 'right' }}>{fmtAmt(billPaid(b), b)}</td>
-                  <td style={{ ...td, textAlign: 'right', fontWeight: 600, color: billBalance(b) > 0.005 ? '#dc2626' : '#059669' }}>
+                  <td style={{ ...td, textAlign: 'right', whiteSpace: 'nowrap' }}>{fmtAmt(billPaid(b), b)}</td>
+                  <td style={{ ...td, textAlign: 'right', whiteSpace: 'nowrap', fontWeight: 600, color: billBalance(b) > 0.005 ? '#dc2626' : '#059669' }}>
                     {fmtAmt(Math.max(0, billBalance(b)), b)}
                   </td>
                   <td style={{ ...td, textTransform: 'capitalize' }}>{statusOf(b)}</td>
@@ -589,6 +589,23 @@ function App() {
   // v1.10.76 - a fresh editor for every invoice opened, so nothing (such as
   // the stock record of the last invoice) carries over to the next one.
   const [editorKey, setEditorKey] = useState(0);
+  // Print from a list (Dashboard / Invoice History): the invoice is prepared
+  // behind a "Preparing print" screen instead of showing the editor page, and
+  // afterwards you land back on the list you came from.
+  const [printBusy, setPrintBusy] = useState(false);
+  const printReturnView = useRef(null);
+  useEffect(() => {
+    if (!printBusy) return undefined;
+    const t = setTimeout(() => { setPrintBusy(false); }, 45000);
+    return () => clearTimeout(t);
+  }, [printBusy]);
+  const finishPrint = () => {
+    const back = printReturnView.current;
+    printReturnView.current = null;
+    setPrintBusy(false);
+    setEditingBill(null);
+    setCurrentView(back || 'dashboard');
+  };
   // v1.10.77 (#84) - sidebar auto-hide (desktop): a slim strip of icons that
   // opens over the page when pointed at, for more room on small screens.
   const [sidebarAutoHide, setSidebarAutoHide] = useState(() => {
@@ -616,6 +633,9 @@ function App() {
   // enough to build the same PDF the invoice screen prints (same pages, HD),
   // prints it, and comes back.
   const handlePrintInvoice = (bill) => {
+    if (printBusy) return;
+    printReturnView.current = currentView === 'new' ? 'dashboard' : currentView;
+    setPrintBusy(true);
     setEditorKey((k) => k + 1);
     sessionStorage.removeItem('gst_invoiceDraft');
     setEditingBill({ ...bill, _printOnOpen: true });
@@ -1103,9 +1123,24 @@ function App() {
         {currentView === 'new' && (
           <InvoiceGenerator
             key={editorKey}
-            onBack={() => { setEditingBill(null); setCurrentView('dashboard'); }}
+            onBack={() => { if (printBusy || printReturnView.current) finishPrint(); else { setEditingBill(null); setCurrentView('dashboard'); } }}
             profile={profile} editingBill={editingBill}
           />
+        )}
+        {printBusy && (
+          <div role="status" aria-live="polite" style={{
+            position: 'fixed', inset: 0, zIndex: 20000, display: 'flex', flexDirection: 'column',
+            alignItems: 'center', justifyContent: 'center', gap: '0.9rem',
+            background: 'var(--bg-primary, #fff)', color: 'var(--text-primary, #111)',
+          }}>
+            <span style={{
+              display: 'inline-block', width: 34, height: 34, border: '3px solid var(--border, #ddd)',
+              borderTopColor: 'var(--primary, #2563eb)', borderRadius: '50%', animation: 'spin 0.8s linear infinite',
+            }} />
+            <div style={{ fontWeight: 600 }}>Preparing invoice for print…</div>
+            <div style={{ fontSize: '0.82rem', color: 'var(--text-muted, #666)' }}>The print window opens in a moment.</div>
+            <button type="button" className="btn btn-secondary" style={{ marginTop: 6 }} onClick={finishPrint}>Cancel</button>
+          </div>
         )}
         {/* v1.10.4 — All lazy views under one Suspense boundary. Only the
              matched view's chunk actually loads; others stay unfetched. */}
