@@ -138,6 +138,11 @@ const InvoicePreview = React.forwardRef(({
   const grandTotal = totals?.total !== undefined ? num(totals.total) : Math.round(totalAmount + halfTax * 2);
   const roundOff = totals?.roundOff !== undefined ? num(totals.roundOff) : grandTotal - (totalAmount + halfTax * 2);
   const words = rupeesInWords(grandTotal);
+  // Advance / client credit applied on this invoice (set by InvoiceGenerator)
+  const appliedCredit = num(totals?.appliedCredit);
+  const netPayable = totals?.netPayable !== undefined
+    ? num(totals.netPayable)
+    : Math.max(0, grandTotal - appliedCredit);
   const terms = termLines(customTerms);
 
   // ---- client block ----
@@ -328,6 +333,12 @@ const InvoicePreview = React.forwardRef(({
                 </div>
                 <div className="ada-calc ada-calc-round"><span>ROUND OFF(+/-)</span><span className="ada-r">{money(roundOff)}</span></div>
                 <div className="ada-calc ada-grand"><span className="ada-r">GRAND TOTAL</span><span className="ada-r">{money(grandTotal)}</span></div>
+                {appliedCredit > 0.005 && (
+                  <>
+                    <div className="ada-calc ada-adv"><span className="ada-r">LESS: ADVANCE RECEIVED</span><span className="ada-r">{money(appliedCredit)}</span></div>
+                    <div className="ada-calc ada-net"><span className="ada-r">NET PAYABLE</span><span className="ada-r">{money(netPayable)}</span></div>
+                  </>
+                )}
               </div>
             </div>
 
@@ -447,6 +458,10 @@ const CSS = `
 .ada-calc-tax { min-height: 40px; }
 .ada-calc-round { margin-top: auto; }
 .ada-grand { border-bottom: 0; background: #e9e9e9; font-weight: 800; border-top: 1.5px solid #000; }
+
+.ada-adv { border-top: 1.5px solid #000; }
+.ada-net { border-bottom: 0; font-weight: 800; border-top: 1px solid #000; }
+.ada-grand:not(:last-child) { border-bottom: 1px solid #000; }
 
 .ada-words { border-bottom: 1.5px solid #000; padding: 5px 8px; font-size: 13px; }
 
