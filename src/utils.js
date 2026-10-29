@@ -299,6 +299,12 @@ export function computeInvoiceTotals(opts) {
   if (isIndia && showGST && !placeOfSupplyRaw && !isExportClient) {
     warnings.push('Place of supply is not set. Falling back to client state.');
   }
+  // A missing or unrecognised customer state must not pass as proof of an
+  // intra-state supply. CGST + SGST is still shown (nothing else can be
+  // decided), but the user is told to fix it before issuing the invoice.
+  if (isIndia && showGST && !isSEZ && !isExportClient && !posCode) {
+    warnings.push('Customer state / place of supply is missing or not recognised, so this supply cannot be classed as intra-state or inter-state. CGST + SGST is shown for now. Set the customer state or place of supply before issuing the invoice.');
+  }
 
   const isInterstate = isIndia && (isSEZ || isExportClient || (
     !!businessCode && !!posCode && businessCode !== posCode
