@@ -547,3 +547,61 @@ export const importData = async (jsonString, selection) => {
 
   return result;
 };
+
+// ---- Client advance / credit ----
+// Money received from a client with no invoice behind it. Each receipt is an
+// entry in client.advances[]; client.creditBalance is always recomputed as the
+// sum of those entries, so it cannot drift. Persisted through the normal
+// /api/clients route (saveClient), so it rides along in backups and restores.
+const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const sumAdvances = (list) => round2((list || []).reduce((s, a) => s + (Number(a.amount) || 0), 0));
+
+export async function addClientAdvance({ clientName, amount, mode, date, description = '' }) {
+  const name = String(clientName || '').trim();
+  const amt = round2(amount);
+  if (!name) throw new Error('Client name is required');
+  if (!(amt > 0)) throw new Error('Amount must be greater than 0');
+
+  const all = await getAllClients();
+  const existing = all.find((c) => c.name === name) || null;
+
+  // Next receipt number: ADV-0001, ADV-0002 ... across all clients.
+  let maxNo = 0;
+  for (const c of all) {
+    for (const a of (c.advances || [])) {
+      const m = /^ADV-(\d+)$/.exec(a.receiptNo || '');
+      if (m) maxNo = Math.max(maxNo, parseInt(m[1], 10));
+    }
+  }
+
+  const prior = existing?.advances || [];
+  const entry = {
+    id: `adv_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
+    receiptNo: `ADV-${String(maxNo + 1).padStart(4, '0')}`,
+    date,
+    amount: amt,
+    mode,
+    description,
+    createdAt: new Date().toISOString(),
+    balanceAfter: sumAdvances(prior) + amt,
+  };
+  entry.balanceAfter = round2(entry.balanceAfter);
+
+  const record = {
+    ...(existing || { name }),
+    advances: [...prior, entry],
+    creditBalance: entry.balanceAfter,
+  };
+  await saveClient(record);
+  return { client: record, entry };
+}
+
+export async function removeClientAdvance(clientId, advanceId) {
+  const all = await getAllClients();
+  const client = all.find((c) => c.id === clientId);
+  if (!client) throw new Error('Client not found');
+  const advances = (client.advances || []).filter((a) => a.id !== advanceId);
+  const record = { ...client, advances, creditBalance: sumAdvances(advances) };
+  await saveClient(record);
+  return record;
+}
