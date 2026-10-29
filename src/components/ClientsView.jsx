@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
-import { Users, Search, FileText, ChevronDown, ChevronUp, Trash2, X, MessageCircle, Mail, Plus, Edit3, Copy, Upload, Download } from 'lucide-react';
+import { Users, Search, FileText, ChevronDown, ChevronUp, Trash2, X, MessageCircle, Mail, Plus, Edit3, Copy, Upload, Download, Printer } from 'lucide-react';
 import HelpButton from './HelpButton';
-import { getAllClients, getAllBills, deleteClient, saveClient, deleteBill, saveBill, getProfile, deleteReceipt, applyStockChanges, trashSavedPdf } from '../store';
+import { getAllClients, getAllBills, deleteClient, saveClient, deleteBill, saveBill, getProfile, deleteReceipt, applyStockChanges, trashSavedPdf, addClientAdvance, removeClientAdvance } from '../store';
 import { formatCurrency, INVOICE_TYPES, markPaidPatch, markUnpaidPatch, salesSign, countsAsSales, isCancelledBill, amountDue, localToday, parseLocalDate, appliedStock, stockDelta } from '../utils';
 import { getPrintSettings } from '../utils/printSettings';
 import { openWhatsAppShare } from '../utils/share';
@@ -35,6 +35,97 @@ const STATUS_COLORS = {
   cancelled: { label: 'Cancelled', color: '#64748b', bg: '#f1f5f9' },
 };
 
+// ---------------------------------------------------------------------------
+// Advance / Credit receipts. Money received from a client with no invoice
+// behind it. Kept on the client record (see addClientAdvance in store.js).
+// ---------------------------------------------------------------------------
+const ADVANCE_MODES = ['Cash', 'UPI', 'NetBanking'];
+
+const escHtml = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => (
+  { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+));
+
+// 1234.5 -> "One Thousand Two Hundred Thirty Four Rupees and Fifty Paise Only"
+// (Indian grouping: crore / lakh / thousand).
+function amountInWords(n) {
+  const ones = ['', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine', 'Ten', 'Eleven', 'Twelve',
+    'Thirteen', 'Fourteen', 'Fifteen', 'Sixteen', 'Seventeen', 'Eighteen', 'Nineteen'];
+  const tens = ['', '', 'Twenty', 'Thirty', 'Forty', 'Fifty', 'Sixty', 'Seventy', 'Eighty', 'Ninety'];
+  const two = (x) => (x < 20 ? ones[x] : tens[Math.floor(x / 10)] + (x % 10 ? ' ' + ones[x % 10] : ''));
+  const three = (x) => (x >= 100 ? ones[Math.floor(x / 100)] + ' Hundred' + (x % 100 ? ' ' : '') : '') + (x % 100 ? two(x % 100) : '');
+  const cents = Math.round((Number(n) || 0) * 100);
+  const rupees = Math.floor(cents / 100);
+  const paise = cents % 100;
+  if (rupees === 0 && paise === 0) return 'Zero Rupees Only';
+  const parts = [];
+  const crore = Math.floor(rupees / 10000000);
+  const lakh = Math.floor((rupees % 10000000) / 100000);
+  const thousand = Math.floor((rupees % 100000) / 1000);
+  const rest = rupees % 1000;
+  if (crore) parts.push(three(crore) + ' Crore');
+  if (lakh) parts.push(two(lakh) + ' Lakh');
+  if (thousand) parts.push(two(thousand) + ' Thousand');
+  if (rest) parts.push(three(rest));
+  let words = parts.join(' ');
+  if (rupees > 0) words += ' Rupees';
+  if (paise > 0) words += (rupees > 0 ? ' and ' : '') + two(paise) + ' Paise';
+  return words + ' Only';
+}
+
+// Full printable HTML document for one advance receipt. Shown in an iframe
+// (preview) and printed from that same iframe, so what you see is what prints.
+function buildVoucherHtml({ profile, clientName, client, entry }) {
+  const [r, g, b] = getAccentRGB();
+  const accent = `rgb(${r}, ${g}, ${b})`;
+  const p = profile || {};
+  const sellerAddr = [p.address, [p.city, p.state, p.pin].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+  const dateStr = entry.date ? parseLocalDate(entry.date).toLocaleDateString('en-IN') : '';
+  const clientAddr = client ? [client.address, [client.city, client.state, client.pin].filter(Boolean).join(' ')].filter(Boolean).join(', ') : '';
+  const hasBal = typeof entry.balanceAfter === 'number';
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Receipt ${escHtml(entry.receiptNo)}</title>
+<style>
+  @page { size: A4; margin: 12mm; }
+  * { box-sizing: border-box; }
+  body { font-family: Arial, Helvetica, sans-serif; color: #0f172a; margin: 0; padding: 16px; font-size: 13px; }
+  .wrap { border: 1.5px solid ${accent}; border-radius: 6px; max-width: 760px; margin: 0 auto; overflow: hidden; }
+  .head { background: ${accent}; color: #fff; padding: 14px 20px; display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
+  .head h1 { margin: 0; font-size: 18px; letter-spacing: .5px; }
+  .head .biz { font-size: 11.5px; opacity: .95; margin-top: 4px; line-height: 1.5; }
+  .head .no { text-align: right; font-size: 12px; line-height: 1.6; white-space: nowrap; }
+  .body { padding: 18px 20px; }
+  .row { display: flex; gap: 12px; padding: 8px 0; border-bottom: 1px dashed #cbd5e1; }
+  .row .k { width: 150px; color: #64748b; font-size: 12px; flex-shrink: 0; }
+  .row .v { flex: 1; font-weight: 600; }
+  .amt { margin: 16px 0; padding: 12px 16px; border: 1.5px solid ${accent}; border-radius: 6px; background: #f8fafc; display: flex; justify-content: space-between; align-items: center; }
+  .amt .lbl { font-size: 12px; color: #64748b; }
+  .amt .num { font-size: 22px; font-weight: 700; color: ${accent}; }
+  .words { font-size: 12.5px; margin-bottom: 6px; }
+  .bal { margin-top: 10px; font-size: 12px; color: #0369a1; font-weight: 600; }
+  .sign { display: flex; justify-content: space-between; margin-top: 54px; font-size: 12px; color: #475569; }
+  .sign div { border-top: 1px solid #94a3b8; padding-top: 4px; min-width: 170px; text-align: center; }
+  .foot { text-align: center; font-size: 10.5px; color: #94a3b8; padding: 10px; border-top: 1px solid #e2e8f0; }
+</style></head><body>
+<div class="wrap">
+  <div class="head">
+    <div>
+      <h1>PAYMENT RECEIPT &middot; ADVANCE VOUCHER</h1>
+      <div class="biz"><strong>${escHtml(p.businessName || '')}</strong><br>${escHtml(sellerAddr)}${p.gstin ? '<br>GSTIN: ' + escHtml(p.gstin) : ''}${p.phone ? '<br>Ph: ' + escHtml(p.phone) : ''}</div>
+    </div>
+    <div class="no">Receipt No: <strong>${escHtml(entry.receiptNo)}</strong><br>Date: <strong>${escHtml(dateStr)}</strong></div>
+  </div>
+  <div class="body">
+    <div class="row"><div class="k">Received from</div><div class="v">${escHtml(clientName)}${clientAddr ? '<div style="font-weight:400;font-size:12px;color:#475569">' + escHtml(clientAddr) + '</div>' : ''}${client?.gstin ? '<div style="font-weight:400;font-size:12px;color:#475569">GSTIN: ' + escHtml(client.gstin) + '</div>' : ''}</div></div>
+    <div class="row"><div class="k">Payment mode</div><div class="v">${escHtml(entry.mode)}</div></div>
+    <div class="row"><div class="k">Towards</div><div class="v">${escHtml(entry.description || 'Advance payment')}</div></div>
+    <div class="amt"><div><div class="lbl">Amount received</div><div class="words">${escHtml(amountInWords(entry.amount))}</div></div><div class="num">${escHtml(formatCurrency(entry.amount, 'INR'))}</div></div>
+    ${hasBal ? `<div class="bal">Total advance / credit available with us after this receipt: ${escHtml(formatCurrency(entry.balanceAfter, 'INR'))}</div>` : ''}
+    <div class="sign"><div>Received by (Client)</div><div>For ${escHtml(p.businessName || 'Business')}<br>Authorised Signatory</div></div>
+  </div>
+  <div class="foot">This is an advance payment receipt, not a tax invoice. Computer-generated.</div>
+</div>
+</body></html>`;
+}
+
 export default function ClientsView({ onEdit, onDuplicate, onNew }) {
   const [clients, setClients] = useState([]);
   const [bills, setBills] = useState([]);
@@ -44,6 +135,12 @@ export default function ClientsView({ onEdit, onDuplicate, onNew }) {
   const [modalClient, setModalClient] = useState(null);
   const [editingClientId, setEditingClientId] = useState(null);
   const [profileCountry, setProfileCountry] = useState('');
+  // Advance / Credit: which client the modal is for, its form, and the receipt preview.
+  const [advanceClient, setAdvanceClient] = useState(null);
+  const [advanceForm, setAdvanceForm] = useState({ amount: '', mode: 'Cash', date: '', description: '' });
+  const [savingAdvance, setSavingAdvance] = useState(false);
+  const [voucher, setVoucher] = useState(null);
+  const voucherFrameRef = useRef(null);
 
   useEffect(() => {
     getProfile().then(p => { if (p?.country) setProfileCountry(p.country); }).catch(() => {});
@@ -605,9 +702,10 @@ export default function ClientsView({ onEdit, onDuplicate, onNew }) {
   });
 
   const handleDeleteClient = async (id) => {
+    const held = Number(clients.find(c => c.id === id)?.creditBalance) || 0;
     if (await confirmAction({
       title: 'Remove this saved client?',
-      message: 'Their existing invoices stay untouched — this only removes them from your saved clients list. You can add them again anytime.',
+      message: 'Their existing invoices stay untouched — this only removes them from your saved clients list. You can add them again anytime.' + (held > 0.005 ? ` Their advance/credit records (${formatCurrency(held, 'INR')}) are stored on this client and will be removed too.` : ''),
       confirmLabel: 'Remove',
       tone: 'danger',
     })) {
@@ -727,7 +825,9 @@ export default function ClientsView({ onEdit, onDuplicate, onNew }) {
   const handleModalSave = async (formData) => {
     if (!formData.name.trim()) { toast('Client name is required', 'warning'); return; }
     try {
-      const data = { ...formData };
+      // Merge over the saved record so advances / creditBalance survive an edit.
+      const existing = editingClientId ? clients.find(c => c.id === editingClientId) : null;
+      const data = { ...(existing || {}), ...formData };
       if (editingClientId) data.id = editingClientId;
       await saveClient(data);
       toast(editingClientId ? 'Client updated' : 'Client added', 'success');
@@ -736,6 +836,77 @@ export default function ClientsView({ onEdit, onDuplicate, onNew }) {
     } catch {
       toast('Failed to save client', 'error');
     }
+  };
+
+  // ---- Advance / Credit ---------------------------------------------------
+  const openAdvance = (clientName) => {
+    setAdvanceForm({ amount: '', mode: 'Cash', date: localToday(), description: '' });
+    setAdvanceClient(clientName);
+  };
+
+  const openVoucher = (clientName, entry) => {
+    const client = clients.find(c => c.name === clientName) || null;
+    setVoucher({
+      clientName,
+      entry,
+      html: buildVoucherHtml({ profile: profileForStatement, clientName, client, entry }),
+    });
+  };
+
+  const handleSaveAdvance = async () => {
+    const amount = Math.round((parseFloat(advanceForm.amount) || 0) * 100) / 100;
+    if (amount <= 0) { toast('Enter an amount greater than 0', 'warning'); return; }
+    if (!advanceForm.date) { toast('Pick a date', 'warning'); return; }
+    setSavingAdvance(true);
+    try {
+      const { client, entry } = await addClientAdvance({
+        clientName: advanceClient,
+        amount,
+        mode: advanceForm.mode,
+        date: advanceForm.date,
+        description: advanceForm.description.trim(),
+      });
+      const name = advanceClient;
+      setAdvanceClient(null);
+      toast(`Advance of ${formatCurrency(amount, 'INR')} saved`, 'success');
+      await loadData();
+      // Open the receipt straight away. Built from the fresh record, not stale state.
+      setVoucher({
+        clientName: name,
+        entry,
+        html: buildVoucherHtml({ profile: profileForStatement, clientName: name, client, entry }),
+      });
+    } catch (e) {
+      console.error('addClientAdvance', e);
+      toast('Could not save the advance', 'error');
+    } finally {
+      setSavingAdvance(false);
+    }
+  };
+
+  const handleDeleteAdvance = async (savedClient, entry) => {
+    if (await confirmAction({
+      title: 'Delete this advance receipt?',
+      message: `${entry.receiptNo} for ${formatCurrency(entry.amount, 'INR')} will be removed and the client's available credit goes down by that amount.`,
+      confirmLabel: 'Delete',
+      tone: 'danger',
+    })) {
+      try {
+        await removeClientAdvance(savedClient.id, entry.id);
+        toast('Advance removed', 'success');
+        loadData();
+      } catch (e) {
+        console.error('removeClientAdvance', e);
+        toast('Could not remove the advance', 'error');
+      }
+    }
+  };
+
+  const printVoucher = () => {
+    const w = voucherFrameRef.current?.contentWindow;
+    if (!w) return;
+    w.focus();
+    w.print();
   };
 
   const shareWhatsApp = (bill) => {
@@ -786,6 +957,77 @@ export default function ClientsView({ onEdit, onDuplicate, onNew }) {
 
       {/* Add/Edit Client Modal */}
       <ClientModal show={showForm} onClose={closeForm} onSave={handleModalSave} client={modalClient} isEditing={!!editingClientId} defaultCountry={profileCountry} />
+
+      {/* Add Advance / Credit modal */}
+      {advanceClient && (
+        <div className="modal-overlay" onClick={() => !savingAdvance && setAdvanceClient(null)}>
+          <div className="modal-content" style={{ maxWidth: '440px' }} onClick={e => e.stopPropagation()}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.25rem' }}>
+              <h3 className="section-title" style={{ margin: 0 }}>💰 Add Advance / Credit</h3>
+              <button className="icon-btn" onClick={() => setAdvanceClient(null)} title="Close" disabled={savingAdvance}><X size={18} /></button>
+            </div>
+            <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', margin: '0 0 1rem' }}>
+              Money received from <strong>{advanceClient}</strong> with no invoice. It is added to their available credit and a receipt is generated.
+            </p>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem' }}>
+              <div style={{ gridColumn: '1 / -1' }}>
+                <label style={{ display: 'block', fontSize: '0.78rem', fontWeight: 600, color: 'var(--text-muted)', marginBottom: 4 }}>Amount (₹) *</label>
+                <input className="form-input" type="number" min="0" step="0.01" autoFocus placeholder="0.00"
+                  value={advanceForm.amount}
+                  onChange={e => setAdvanceForm(f => ({ ...f, amount: e.target.value }))}
+                  onKeyDown={e => { if (e.key === 'Enter') handleSaveAdvance(); }}
+                  style={{ width: '100%', fontSize: '1.1rem', fontWeight: 600 }} />
+              </div>
+              <div>
+                <label style={{ display: 'block', fontSize: '0.78rem', fontWeight: 600, color: 'var(--text-muted)', marginBottom: 4 }}>Payment mode</label>
+                <select className="form-input" value={advanceForm.mode}
+                  onChange={e => setAdvanceForm(f => ({ ...f, mode: e.target.value }))} style={{ width: '100%' }}>
+                  {ADVANCE_MODES.map(m => <option key={m} value={m}>{m}</option>)}
+                </select>
+              </div>
+              <div>
+                <label style={{ display: 'block', fontSize: '0.78rem', fontWeight: 600, color: 'var(--text-muted)', marginBottom: 4 }}>Date</label>
+                <input className="form-input" type="date" value={advanceForm.date}
+                  onChange={e => setAdvanceForm(f => ({ ...f, date: e.target.value }))} style={{ width: '100%' }} />
+              </div>
+              <div style={{ gridColumn: '1 / -1' }}>
+                <label style={{ display: 'block', fontSize: '0.78rem', fontWeight: 600, color: 'var(--text-muted)', marginBottom: 4 }}>Description (optional)</label>
+                <input className="form-input" type="text" maxLength={140} placeholder="e.g. Advance for work"
+                  value={advanceForm.description}
+                  onChange={e => setAdvanceForm(f => ({ ...f, description: e.target.value }))} style={{ width: '100%' }} />
+              </div>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.5rem', marginTop: '1.25rem' }}>
+              <button className="btn btn-secondary" onClick={() => setAdvanceClient(null)} disabled={savingAdvance}>Cancel</button>
+              <button className="btn btn-primary" onClick={handleSaveAdvance} disabled={savingAdvance}>
+                {savingAdvance ? 'Saving…' : 'Save & Print Receipt'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Receipt / voucher preview — opens right after saving, prints from the same frame */}
+      {voucher && (
+        <div className="modal-overlay" onClick={() => setVoucher(null)}>
+          <div className="modal-content" style={{ maxWidth: '820px', width: '94vw' }} onClick={e => e.stopPropagation()}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+              <h3 className="section-title" style={{ margin: 0 }}>Receipt {voucher.entry.receiptNo}</h3>
+              <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                <button className="btn btn-primary" style={{ fontSize: '0.8rem', padding: '0.4rem 0.9rem' }} onClick={printVoucher}>
+                  <Printer size={15} /> Print
+                </button>
+                <button className="icon-btn" onClick={() => setVoucher(null)} title="Close"><X size={18} /></button>
+              </div>
+            </div>
+            <iframe ref={voucherFrameRef} title="Advance receipt" srcDoc={voucher.html}
+              style={{ width: '100%', height: '62vh', border: '1px solid var(--border)', borderRadius: 6, background: '#fff' }} />
+            <p style={{ fontSize: '0.72rem', color: 'var(--text-muted)', margin: '0.5rem 0 0' }}>
+              Tip: choose “Save as PDF” in the print dialog to keep or share a PDF copy.
+            </p>
+          </div>
+        </div>
+      )}
 
       {/* Search */}
       <div className="glass-panel p-4 mb-6">
@@ -852,6 +1094,17 @@ export default function ClientsView({ onEdit, onDuplicate, onNew }) {
                         {formatCurrency(Math.abs(stats.unpaid))}
                       </span>
                     </div>
+                    {(Number(savedClient?.creditBalance) || 0) > 0.005 && (
+                      <div className="client-stat">
+                        <span className="client-stat-label">Advance</span>
+                        <span className="client-stat-value" style={{ color: '#0369a1' }}>{formatCurrency(savedClient.creditBalance)}</span>
+                      </div>
+                    )}
+                    <button className="btn btn-secondary" style={{ fontSize: '0.72rem', padding: '0.3rem 0.6rem', whiteSpace: 'nowrap' }}
+                      onClick={e => { e.stopPropagation(); openAdvance(clientName); }}
+                      title="Receive money from this client without an invoice">
+                      💰 Add Advance/Credit
+                    </button>
                     <div style={{ marginLeft: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.25rem', fontSize: '0.75rem', color: 'var(--text-muted)' }}>
                       {isExpanded ? 'Hide' : 'View'} {isExpanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
                     </div>
@@ -863,6 +1116,11 @@ export default function ClientsView({ onEdit, onDuplicate, onNew }) {
                   <div className="client-invoices">
                     {/* Action bar (right-aligned) — Statement + Aging PDFs. */}
                     <div style={{ padding: '0.5rem 1.5rem', borderBottom: '1px solid var(--border)', display: 'flex', justifyContent: 'flex-end', gap: '0.5rem', flexWrap: 'wrap' }}>
+                      <button className="btn btn-primary" style={{ fontSize: '0.78rem', padding: '0.35rem 0.75rem' }}
+                        onClick={() => openAdvance(clientName)}
+                        title="Receive money from this client without an invoice">
+                        💰 Add Advance/Credit
+                      </button>
                       <button className="btn btn-secondary" style={{ fontSize: '0.78rem', padding: '0.35rem 0.75rem' }}
                         onClick={() => generateClientStatement(clientName)}
                         title="Account statement: every invoice, credit note, payment, and running balance in one PDF">
@@ -910,6 +1168,52 @@ export default function ClientsView({ onEdit, onDuplicate, onNew }) {
                         )}
                         {savedClient.email && <span>{savedClient.email}</span>}
                         {savedClient.phone && <span>{savedClient.phone}</span>}
+                      </div>
+                    )}
+                    {/* Advance / Credit receipts for this client */}
+                    {(savedClient?.advances || []).length > 0 && (
+                      <div style={{ padding: '0.75rem 1.5rem', borderBottom: '1px solid var(--border)' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem', flexWrap: 'wrap', gap: '0.5rem' }}>
+                          <strong style={{ fontSize: '0.85rem' }}>Advance / Credit received</strong>
+                          <span style={{ fontSize: '0.8rem', fontWeight: 700, color: '#0369a1' }}>
+                            Available credit: {formatCurrency(savedClient.creditBalance || 0, 'INR')}
+                          </span>
+                        </div>
+                        <div className="table-scroll">
+                          <table className="data-table" style={{ marginBottom: 0, minWidth: '620px' }}>
+                            <thead>
+                              <tr>
+                                <th>Date</th>
+                                <th>Receipt No.</th>
+                                <th>Mode</th>
+                                <th>Description</th>
+                                <th style={{ textAlign: 'right' }}>Amount</th>
+                                <th className="col-center">Actions</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {[...savedClient.advances].sort((a, b) => String(b.date).localeCompare(String(a.date)) || String(b.createdAt).localeCompare(String(a.createdAt))).map(adv => (
+                                <tr key={adv.id}>
+                                  <td className="text-muted">{adv.date ? parseLocalDate(adv.date).toLocaleDateString('en-IN') : ''}</td>
+                                  <td><span className="invoice-badge">{adv.receiptNo}</span></td>
+                                  <td><span className="type-badge">{adv.mode}</span></td>
+                                  <td className="text-muted">{adv.description || '—'}</td>
+                                  <td className="font-bold" style={{ textAlign: 'right', color: '#0369a1' }}>{formatCurrency(adv.amount, 'INR')}</td>
+                                  <td>
+                                    <div className="table-actions">
+                                      <button className="icon-btn icon-btn-blue" onClick={() => openVoucher(clientName, adv)} title="View / print receipt">
+                                        <Printer size={14} />
+                                      </button>
+                                      <button className="icon-btn icon-btn-red" onClick={() => handleDeleteAdvance(savedClient, adv)} title="Delete advance">
+                                        <Trash2 size={14} />
+                                      </button>
+                                    </div>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
                       </div>
                     )}
                     {clientBills.length === 0 ? (
