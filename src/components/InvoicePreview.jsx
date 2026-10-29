@@ -5,6 +5,411 @@ import { numberToWords, printedSubtotal, formatCurrency, INVOICE_TYPES, getCount
 import { getPrintSettings, getLabel, formatCurrencyEx, formatDate } from '../utils/printSettings';
 import InvoiceGridLayout, { HsnSummaryTable } from './InvoiceGridLayout';
 
+// ====================================================================
+// 10th template preset: 'ada_interiors' (Label: "Ada Interiors Custom")
+// Selected when options.pdfStyle / printSettings.pdfTemplate === 'ada_interiors'.
+// Self-contained - every helper is prefixed `ada` / `ADA_` so it cannot clash
+// with anything else in this file.
+// ====================================================================
+/* ------------------------------------------------------------------ */
+/*  Ada Interiors Custom – A4 invoice template                         */
+/*  Use inside InvoicePreview.jsx when activePreset === 'ada_interiors' */
+/* ------------------------------------------------------------------ */
+
+const ADA_SELLER = {
+  gstNo: '03CYQPK1275H1ZB',
+  panNo: 'CYQPK1275H',
+  name: 'ADA INTERIORS',
+  addressLines: ['#22/3, RANCHI COLONY, NR RAILWAY LINE', 'THREEKE ROAD', 'LUDHIANA'],
+  phones: ['83600-93750', '99885-04240'],
+  bank: {
+    name: 'PUNJAB NATIONAL BANK',
+    acNo: '1798002100001203',
+    ifsc: 'PUNB0179800',
+    branch: 'BAREWAL LUDHIANA',
+  },
+  terms: [
+    'Goods once sold will not be taken back.',
+    'Interest @ 24% p.a will be charged  if bill is not paid within 30 days.',
+    'Subject to Ludhiana Jurisdiction Only.',
+  ],
+};
+
+// column widths (%) – must add up to exactly 100
+const ADA_COLS = [4.5, 25.5, 8.5, 5.5, 9.5, 8.5, 11, 5.5, 8, 5.5, 8];
+// vertical grid lines (% from left): after S.No, Description, HSN, Unit, Qty, Rate, Amount, SGST
+const ADA_VLINES = [4.5, 30, 38.5, 44, 53.5, 62, 73, 86.5];
+
+const adaNum = (v) => (v === undefined || v === null || v === '' ? 0 : Number(v) || 0);
+const adaMoney = (v) => adaNum(v).toFixed(2);
+const adaQtyFmt = (v) => adaNum(v).toFixed(3);
+
+/* ---------- amount in words (Indian system) ---------- */
+const ADA_ONES = ['', 'ONE', 'TWO', 'THREE', 'FOUR', 'FIVE', 'SIX', 'SEVEN', 'EIGHT', 'NINE', 'TEN',
+  'ELEVEN', 'TWELVE', 'THIRTEEN', 'FOURTEEN', 'FIFTEEN', 'SIXTEEN', 'SEVENTEEN', 'EIGHTEEN', 'NINETEEN'];
+const ADA_TENS = ['', '', 'TWENTY', 'THIRTY', 'FORTY', 'FIFTY', 'SIXTY', 'SEVENTY', 'EIGHTY', 'NINETY'];
+
+const adaTwoDigits = (n) => (n < 20 ? ADA_ONES[n] : `${ADA_TENS[Math.floor(n / 10)]}${n % 10 ? ' ' + ADA_ONES[n % 10] : ''}`);
+const adaThreeDigits = (n) =>
+  `${n >= 100 ? ADA_ONES[Math.floor(n / 100)] + ' HUNDRED' : ''}${n % 100 ? (n >= 100 ? ' ' : '') + adaTwoDigits(n % 100) : ''}`;
+
+const adaRupeesInWords = (value) => {
+  const total = Math.round(adaNum(value) * 100);
+  let rupees = Math.floor(total / 100);
+  const paise = total % 100;
+  if (rupees === 0 && paise === 0) return 'RUPEES ZERO ONLY';
+  const parts = [];
+  const crore = Math.floor(rupees / 10000000); rupees %= 10000000;
+  const lakh = Math.floor(rupees / 100000); rupees %= 100000;
+  const thousand = Math.floor(rupees / 1000); rupees %= 1000;
+  if (crore) parts.push(`${adaThreeDigits(crore)} CRORE`);
+  if (lakh) parts.push(`${adaTwoDigits(lakh)} LAKH`);
+  if (thousand) parts.push(`${adaTwoDigits(thousand)} THOUSAND`);
+  if (rupees) parts.push(adaThreeDigits(rupees));
+  let words = `RUPEES ${parts.join(' ')}`.trim();
+  if (paise) words += ` AND ${adaTwoDigits(paise)} PAISE`;
+  return `${words}  ONLY`;
+};
+
+/* ------------------------------------------------------------------ */
+/*  data shape expected by this component                              */
+/*                                                                     */
+/*  {                                                                  */
+/*    copyLabel: 'Original For Recipient',                             */
+/*    paymentType: 'CREDIT',                                           */
+/*    invoiceNo, date, grNo, grDate, transport, vehicleNo, pMark,      */
+/*    eRefNo, deliveryAt,                                              */
+/*    client: { name, address, gstin, stateCode, stateName },          */
+/*    items: [{ name, hsn, unit, qty, rate, amount,                    */
+/*              sgstPct, sgstAmt, cgstPct, cgstAmt }],                 */
+/*    totals: { taxable, sgst, cgst, roundOff, grandTotal },           */
+/*    amountInWords                                                    */
+/*  }                                                                  */
+/*  Missing totals are calculated from items.                          */
+/* ------------------------------------------------------------------ */
+function AdaInteriorsTemplate({ data = {} }) {
+  const items = Array.isArray(data.items) ? data.items : [];
+  const client = data.client || {};
+
+  const totalQty = items.reduce((s, i) => s + adaNum(i.qty), 0);
+  const totalAmount = items.reduce((s, i) => s + adaNum(i.amount), 0);
+
+  const t = data.totals || {};
+  const taxable = t.taxable !== undefined ? adaNum(t.taxable) : totalAmount;
+  const sgst = t.sgst !== undefined ? adaNum(t.sgst) : items.reduce((s, i) => s + adaNum(i.sgstAmt), 0);
+  const cgst = t.cgst !== undefined ? adaNum(t.cgst) : items.reduce((s, i) => s + adaNum(i.cgstAmt), 0);
+  const raw = taxable + sgst + cgst;
+  const grandTotal = t.grandTotal !== undefined ? adaNum(t.grandTotal) : Math.round(raw);
+  const roundOff = t.roundOff !== undefined ? adaNum(t.roundOff) : grandTotal - raw;
+
+  const words = data.amountInWords || adaRupeesInWords(grandTotal);
+
+  return (
+    <div className="ada-page">
+      <style>{ADA_CSS}</style>
+
+      <div className="ada-sheet">
+        {/* ---------------- HEADER ---------------- */}
+        <div className="ada-header">
+          <div className="ada-header-top">
+            <div className="ada-hl">
+              <div className="ada-idbox"><b>GST NO :</b> {ADA_SELLER.gstNo}</div>
+              <div className="ada-idbox"><b>PAN NO :</b> {ADA_SELLER.panNo}</div>
+            </div>
+            <div className="ada-hc">
+              <div className="ada-frame">
+                <div className="ada-frame-title">&lt;&lt;TAX INVOICE&gt;&gt;</div>
+                <div className="ada-frame-sub">({data.copyLabel || 'Original For Recipient'})</div>
+              </div>
+            </div>
+            <div className="ada-hr">
+              <div className="ada-phone"><b>Ph. :</b> {ADA_SELLER.phones[0]}</div>
+              <div className="ada-phone">{ADA_SELLER.phones[1]}</div>
+            </div>
+          </div>
+
+          <div className="ada-brand">{ADA_SELLER.name}</div>
+          <div className="ada-address">
+            {ADA_SELLER.addressLines.map((l) => (
+              <div key={l}>{l}</div>
+            ))}
+          </div>
+          <div className="ada-credit">{data.paymentType || 'CREDIT'}</div>
+        </div>
+
+        {/* ---------------- UPPER SPLIT BOX ---------------- */}
+        <div className="ada-split">
+          <div className="ada-split-left">
+            <div className="ada-client">
+              <span className="ada-ms">M/s</span>
+              <div>
+                <div className="ada-client-name">{client.name}</div>
+                <div className="ada-client-addr">{client.address}</div>
+              </div>
+            </div>
+            <div className="ada-state-row">
+              <div className="ada-state">
+                <span className="ada-state-code">{client.stateCode}</span>
+                <span className="ada-state-name">{client.stateName}</span>
+              </div>
+            </div>
+            <div className="ada-client-gst"><b>GST NO. :</b> <b>{client.gstin}</b></div>
+            <div className="ada-delivery">
+              <span className="ada-muted">Delivery At :</span> {data.deliveryAt}
+            </div>
+          </div>
+
+          <div className="ada-split-right">
+            <div className="ada-rrow ada-rrow-2">
+              <div>Invoice No. : <span className="ada-mono">{data.invoiceNo}</span></div>
+              <div>Dated : <span className="ada-mono">{data.date}</span></div>
+            </div>
+            <div className="ada-rrow ada-rrow-2">
+              <div>GR No. : {data.grNo}</div>
+              <div>Dt. : {data.grDate || '/ /'}</div>
+            </div>
+            <div className="ada-rrow">Transport : {data.transport}</div>
+            <div className="ada-rrow">Vehicle No. : {data.vehicleNo}</div>
+            <div className="ada-rrow">P. Mark : {data.pMark}</div>
+            <div className="ada-rrow ada-rrow-last"><b>Electronic Reference No. :</b> {data.eRefNo}</div>
+          </div>
+        </div>
+
+        {/* ---------------- ITEMS TABLE ---------------- */}
+        <div className="ada-items">
+          {/* column lines are drawn once, full height, so they never get cut */}
+          <div className="ada-vlines" aria-hidden="true">
+            {ADA_VLINES.map((left) => (
+              <i key={left} style={{ left: `${left}%` }} />
+            ))}
+          </div>
+
+          <table className="ada-table">
+            <colgroup>
+              {ADA_COLS.map((w, i) => (
+                <col key={i} style={{ width: `${w}%` }} />
+              ))}
+            </colgroup>
+            <thead>
+              <tr>
+                <th rowSpan={2} className="ada-left">S.No.</th>
+                <th rowSpan={2} className="ada-left">DESCRIPTION OF GOODS</th>
+                <th rowSpan={2}>HSN<br />CODE</th>
+                <th rowSpan={2}>UNIT</th>
+                <th rowSpan={2}>QNTY.</th>
+                <th rowSpan={2}>RATE</th>
+                <th rowSpan={2}>AMOUNT</th>
+                <th colSpan={2} className="ada-tax-h">SGST</th>
+                <th colSpan={2} className="ada-tax-h">CGST</th>
+              </tr>
+              <tr>
+                <th className="ada-sub">%</th>
+                <th className="ada-sub">Amt.</th>
+                <th className="ada-sub">%</th>
+                <th className="ada-sub">Amt.</th>
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((it, idx) => (
+                <tr key={idx} className="ada-item-row">
+                  <td className="ada-r">{idx + 1}</td>
+                  <td>{it.name}</td>
+                  <td>{it.hsn}</td>
+                  <td>{it.unit}</td>
+                  <td className="ada-r">{adaQtyFmt(it.qty)}</td>
+                  <td className="ada-r">{adaMoney(it.rate)}</td>
+                  <td className="ada-r">{adaMoney(it.amount)}</td>
+                  <td className="ada-sm">{adaNum(it.sgstPct).toFixed(1)}%</td>
+                  <td className="ada-r">{adaMoney(it.sgstAmt)}</td>
+                  <td className="ada-sm">{adaNum(it.cgstPct).toFixed(1)}%</td>
+                  <td className="ada-r">{adaMoney(it.cgstAmt)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+
+          {/* empty space – pushes the Total row to the bottom of the grid */}
+          <div className="ada-spacer" />
+
+          <table className="ada-table ada-total-table">
+            <colgroup>
+              {ADA_COLS.map((w, i) => (
+                <col key={i} style={{ width: `${w}%` }} />
+              ))}
+            </colgroup>
+            <tbody>
+              <tr>
+                <td />
+                <td className="ada-total-label">Total</td>
+                <td />
+                <td />
+                <td className="ada-r">{adaQtyFmt(totalQty)}</td>
+                <td />
+                <td className="ada-r">{adaMoney(totalAmount)}</td>
+                <td />
+                <td />
+                <td />
+                <td />
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        {/* ---------------- BANK + TOTALS ---------------- */}
+        <div className="ada-foot">
+          <div className="ada-foot-left">
+            <div className="ada-reverse">Reverse Charge Not Applicable</div>
+            <div className="ada-bank">
+              <div>{ADA_SELLER.bank.name}</div>
+              <div>A/C NO : {ADA_SELLER.bank.acNo}</div>
+              <div>IFSC CODE : {ADA_SELLER.bank.ifsc}</div>
+              <div>BRANCH : {ADA_SELLER.bank.branch}</div>
+            </div>
+            <div className="ada-bank-gap" />
+          </div>
+
+          <div className="ada-foot-right">
+            <div className="ada-calc ada-calc-top"><span /><span /></div>
+            <div className="ada-calc"><span>TAXABLE AMOUNT</span><span className="ada-r">{adaMoney(taxable)}</span></div>
+            <div className="ada-calc ada-calc-tax">
+              <span>ADD SGST<br />ADD CGST</span>
+              <span className="ada-r">{adaMoney(sgst)}<br />{adaMoney(cgst)}</span>
+            </div>
+            <div className="ada-calc ada-calc-round"><span>ROUND OFF(+/-)</span><span className="ada-r">{adaMoney(roundOff)}</span></div>
+            <div className="ada-calc ada-grand"><span className="ada-r">GRAND TOTAL</span><span className="ada-r">{adaMoney(grandTotal)}</span></div>
+          </div>
+        </div>
+
+        <div className="ada-words"><b>Amount in Words : {words}</b></div>
+
+        {/* ---------------- TERMS + SIGNATURES ---------------- */}
+        <div className="ada-bottom">
+          <div className="ada-bottom-top">
+            <div className="ada-terms">
+              <div>Terms &amp; Conditions :</div>
+              {ADA_SELLER.terms.map((tm, i) => (
+                <div key={i}>{i + 1}. {tm}</div>
+              ))}
+            </div>
+            <div className="ada-for"><b>For {ADA_SELLER.name}</b></div>
+          </div>
+          <div className="ada-sign-row">
+            <b>E. &amp; O. E.</b>
+            <b className="ada-receiver">Receiver's Signature</b>
+            <b>Authorised Signatory</b>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+const ADA_CSS = `
+@page { size: A4 portrait; margin: 8mm; }
+
+.ada-page {
+  width: 100%;
+  min-height: 297mm;
+  margin: 0 auto;
+  padding: 8mm;
+  box-sizing: border-box;
+  background: #fff;
+  color: #000;
+  font-family: Arial, Helvetica, sans-serif;
+  font-size: 12px;
+  line-height: 1.3;
+}
+.ada-page * { box-sizing: border-box; }
+.ada-sheet { border: 1.5px solid #000; }
+.ada-r { text-align: right; }
+.ada-mono { font-family: 'Courier New', monospace; font-size: 13px; font-weight: 700; }
+.ada-muted { color: #000; }
+
+@media print {
+  .ada-page { width: auto; min-height: 0; padding: 0; margin: 0; }
+  .ada-sheet { break-inside: avoid; }
+  .ada-page, .ada-page * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+}
+
+/* header */
+.ada-header { position: relative; padding: 6px 8px 0; border-bottom: 1.5px solid #000; }
+.ada-header-top { display: grid; grid-template-columns: 1fr 1.2fr 1fr; align-items: start; }
+.ada-idbox { font-weight: 700; font-size: 13px; line-height: 1.35; }
+.ada-idbox b { font-weight: 700; }
+.ada-hc { display: flex; justify-content: center; }
+.ada-frame { border: 1px solid #000; padding: 2px 14px; text-align: center; }
+.ada-frame-title { font-weight: 700; font-size: 15px; }
+.ada-frame-sub { font-weight: 700; font-size: 11px; }
+.ada-hr { text-align: right; font-weight: 700; font-size: 13px; line-height: 1.5; }
+.ada-brand { text-align: center; font-size: 38px; font-weight: 800; font-style: italic; letter-spacing: -0.5px; margin-top: 2px; }
+.ada-address { text-align: center; font-weight: 700; font-size: 14px; margin: 14px 0 4px; line-height: 1.35; }
+.ada-credit { text-align: right; font-weight: 800; font-size: 14px; padding: 0 0 3px; }
+
+/* upper split */
+.ada-split { display: grid; grid-template-columns: 57% 43%; border-bottom: 1.5px solid #000; }
+.ada-split-left { border-right: 1.5px solid #000; display: flex; flex-direction: column; }
+.ada-client { display: flex; gap: 10px; padding: 4px 8px; min-height: 52px; }
+.ada-ms { font-size: 13px; }
+.ada-client-name { font-weight: 700; font-size: 14px; }
+.ada-client-addr { font-size: 13px; }
+.ada-state-row { display: flex; justify-content: flex-end; padding: 0 2px 0 0; margin-top: auto; }
+.ada-state { display: flex; border: 1px solid #000; width: 66%; height: 24px; margin-bottom: 4px; }
+.ada-state-code { width: 18%; border-right: 1px solid #000; text-align: center; line-height: 22px; font-size: 13px; }
+.ada-state-name { flex: 1; text-align: center; line-height: 22px; font-size: 13px; }
+.ada-client-gst { border-top: 1px solid #000; padding: 3px 8px; font-size: 13px; }
+.ada-delivery { border-top: 1px solid #000; padding: 4px 8px; min-height: 44px; font-size: 13px; }
+
+.ada-split-right { display: flex; flex-direction: column; }
+.ada-rrow { padding: 3px 6px; font-size: 13px; min-height: 28px; }
+.ada-rrow-2 { display: grid; grid-template-columns: 1.3fr 1fr; border-bottom: 1px solid #000; gap: 6px; }
+.ada-rrow-last { margin-top: auto; }
+
+/* items */
+.ada-items { position: relative; display: flex; flex-direction: column; min-height: 430px; border-bottom: 1.5px solid #000; }
+.ada-vlines { position: absolute; top: 0; bottom: 0; left: 0; right: 0; pointer-events: none; }
+.ada-vlines i { position: absolute; top: 0; bottom: 0; width: 0; border-left: 1px solid #000; }
+.ada-spacer { flex: 1 1 auto; }
+.ada-table { position: relative; width: 100%; border-collapse: collapse; table-layout: fixed; }
+.ada-table th, .ada-table td { padding: 2px 5px; font-size: 13px; color: #000; vertical-align: top; }
+.ada-table thead th { border-bottom: 1.5px solid #000; font-weight: 700; text-align: center; vertical-align: middle; font-size: 13px; }
+.ada-table thead th.ada-left { text-align: left; }
+.ada-table thead th.ada-tax-h { border-bottom: 0; padding-bottom: 0; }
+.ada-table thead th.ada-sub { font-size: 12px; font-weight: 700; padding-top: 0; }
+.ada-table thead tr:nth-child(2) th { border-bottom: 1.5px solid #000; }
+.ada-item-row td { height: 21px; }
+.ada-sm { font-size: 11px !important; text-align: left; }
+.ada-total-table td { border-top: 1.5px solid #000; height: 26px; vertical-align: middle; }
+.ada-total-label { text-align: right; font-weight: 700; font-size: 14px !important; }
+
+/* bank + totals */
+.ada-foot { display: grid; grid-template-columns: 64.3% 35.7%; border-bottom: 1.5px solid #000; }
+.ada-foot-left { border-right: 1.5px solid #000; display: flex; flex-direction: column; }
+.ada-reverse { font-weight: 700; font-size: 13px; padding: 3px 8px; border-bottom: 1px solid #000; }
+.ada-bank { font-family: 'Courier New', monospace; font-size: 12px; font-weight: 700; line-height: 1.25; padding: 4px 6px; flex: 1; min-height: 64px; }
+.ada-bank-gap { border-top: 1px solid #000; height: 28px; }
+
+.ada-foot-right { display: flex; flex-direction: column; }
+.ada-calc { display: grid; grid-template-columns: 1fr 1fr; border-bottom: 1px solid #000; font-size: 13px; }
+.ada-calc > span { padding: 3px 8px; }
+.ada-calc > span:first-child { border-right: 1.5px solid #000; }
+.ada-calc-top { height: 26px; }
+.ada-calc-tax { min-height: 40px; }
+.ada-calc-round { margin-top: auto; }
+.ada-grand { border-bottom: 0; background: #e9e9e9; font-weight: 800; }
+
+.ada-words { border-bottom: 1.5px solid #000; padding: 5px 8px; font-size: 13px; }
+
+/* terms + signatures */
+.ada-bottom { padding: 4px 8px 4px; }
+.ada-bottom-top { display: flex; justify-content: space-between; align-items: flex-start; }
+.ada-terms { font-size: 13px; line-height: 1.35; }
+.ada-for { font-size: 15px; }
+.ada-sign-row { display: grid; grid-template-columns: 1fr 1fr 1fr; align-items: end; margin-top: 18px; font-size: 14px; }
+.ada-sign-row .ada-receiver { text-align: center; }
+.ada-sign-row > :last-child { text-align: right; }
+`;
+
 // v1.10.36 — Optional `previewOnly` prop suppresses the internal
 // `id="invoice-preview"`. The parent's on-screen preview keeps the id
 // (needed by the @media print CSS rules in index.css:1258 for the
@@ -204,6 +609,8 @@ const InvoicePreview = React.forwardRef(({ profile: profileProp, client, details
     ? (pdfStyleRaw === 'corporate' ? 'classic' : 'minimal')
     : pdfStyleRaw;
   const pdfStyleVariant = pdfStyleRaw; // full value for CSS class targeting
+  // 10th preset - Ada Interiors Custom (own self-contained layout)
+  const isAda = pdfStyleRaw === 'ada_interiors';
 
   // Check if any item has discount
   const hasAnyDiscount = showDiscount && items.some(item => (item.discount || 0) > 0);
@@ -1026,6 +1433,58 @@ const InvoicePreview = React.forwardRef(({ profile: profileProp, client, details
     },
   } : null;
 
+  // Ada Interiors Custom - map the app's invoice data onto the template shape.
+  // GST is split 50/50 into SGST + CGST (the layout has no IGST column).
+  const adaData = isAda ? (() => {
+    const rows = items.map((it) => {
+      const l = lineCalc(it);
+      const half = (l.rate || 0) / 2;
+      return {
+        name: it.name || it.description || '',
+        hsn: it.hsn || '',
+        unit: it.unit || '',
+        qty: Number(it.quantity) || 0,
+        rate: Number(it.rate) || 0,
+        amount: l.taxable,
+        sgstPct: half, sgstAmt: l.tax / 2,
+        cgstPct: half, cgstAmt: l.tax / 2,
+      };
+    });
+    const taxable = rows.reduce((s, r) => s + r.amount, 0);
+    const gstSum = (Number(totals?.cgst) || 0) + (Number(totals?.sgst) || 0) + (Number(totals?.utgst) || 0) + (Number(totals?.igst) || 0);
+    const halfTax = gstSum > 0 ? gstSum / 2 : rows.reduce((s, r) => s + r.sgstAmt, 0);
+    const clientAddr = [client?.address, [client?.city, client?.pin].filter(Boolean).join(' - ')].filter(Boolean).join(', ');
+    const gst = client?.gstin || '';
+    return {
+      copyLabel: options.copyLabel || 'Original For Recipient',
+      paymentType: options.paymentType || details?.paymentType || 'CREDIT',
+      invoiceNo: details?.invoiceNumber || '',
+      date: details?.invoiceDate ? fmtDate(details.invoiceDate) : '',
+      grNo: details?.grNo || '',
+      grDate: details?.grDate || '',
+      transport: details?.transport || '',
+      vehicleNo: details?.vehicleNo || '',
+      pMark: details?.pMark || '',
+      eRefNo: details?.eRefNo || '',
+      deliveryAt: [details?.shippingAddress, details?.shippingCity, details?.shippingState].filter(Boolean).join(', '),
+      client: {
+        name: client?.name || '',
+        address: clientAddr,
+        gstin: gst,
+        stateCode: /^\d{2}/.test(gst) ? gst.slice(0, 2) : '',
+        stateName: client?.state || '',
+      },
+      items: rows,
+      totals: {
+        taxable,
+        sgst: halfTax,
+        cgst: halfTax,
+        roundOff: Number(totals?.roundOff) || 0,
+        grandTotal: Number(totals?.total) || 0,
+      },
+    };
+  })() : null;
+
   return (
     <div
       className={`invoice-preview-container ${paperCfg.cssClass} template-${pdfStyleVariant}`}
@@ -1049,6 +1508,7 @@ const InvoicePreview = React.forwardRef(({ profile: profileProp, client, details
         </div>
       )}
       {isGrid && <InvoiceGridLayout ctx={gridCtx} />}
+      {isAda && <AdaInteriorsTemplate data={adaData} />}
       {isGrid && _ps.termsSeparatePage && (htmlHasText(sanitizedTerms) || htmlHasText(sanitizedNotes)) && (
         <div data-pdf-page="terms" style={{ padding: '2rem', pageBreakBefore: 'always', breakBefore: 'page' }}>
           {showTerms && htmlHasText(sanitizedTerms) && (
@@ -1065,7 +1525,7 @@ const InvoicePreview = React.forwardRef(({ profile: profileProp, client, details
           )}
         </div>
       )}
-      {!isGrid && (<>
+      {!isGrid && !isAda && (<>
       {!hideHeaderBecauseLetterhead && pdfStyle === 'modern' && renderModernHeader()}
       {!hideHeaderBecauseLetterhead && pdfStyle === 'minimal' && renderMinimalHeader()}
       {!hideHeaderBecauseLetterhead && pdfStyle === 'classic' && renderClassicHeader()}
