@@ -1677,9 +1677,9 @@ export default function Dashboard({ onNew, onEdit, onPrint, onDuplicate, onConve
                       {visibleColumns.currency && <td className="text-muted">{billCurrency}</td>}
                       {visibleColumns.dueDate && <td className="text-muted">{bill.data?.details?.dueDate ? new Date(bill.data.details.dueDate).toLocaleDateString('en-IN') : <span className="cell-empty">—</span>}</td>}
                       {visibleColumns.printed && <td className="text-muted" style={{ textAlign: 'center' }}>{Number(bill.printedCount) || 0}×</td>}
-                      <td className="text-muted col-center">{(bill.paidAmount || 0) > 0 ? formatCurrency(bill.paidAmount, billCurrency) : <span className="cell-empty">—</span>}</td>
-                      <td className="col-center" style={{ color: '#0369a1' }}>{advanceOn(bill) > 0.005 ? '− ' + formatCurrency(advanceOn(bill), billCurrency) : <span className="cell-empty">—</span>}</td>
-                      <td className="col-center font-bold" style={{ color: (amountDue(bill) - (bill.paidAmount || 0)) > 0.005 ? '#dc2626' : '#059669' }}>
+                      <td className="text-muted col-center" style={{ whiteSpace: 'nowrap' }}>{(bill.paidAmount || 0) > 0 ? formatCurrency(bill.paidAmount, billCurrency) : <span className="cell-empty">—</span>}</td>
+                      <td className="col-center" style={{ color: '#0369a1', whiteSpace: 'nowrap' }}>{advanceOn(bill) > 0.005 ? formatCurrency(advanceOn(bill), billCurrency) : <span className="cell-empty">—</span>}</td>
+                      <td className="col-center font-bold" style={{ whiteSpace: 'nowrap', color: (amountDue(bill) - (bill.paidAmount || 0)) > 0.005 ? '#dc2626' : '#059669' }}>
                         {tracksPayment && status !== 'cancelled'
                           ? formatCurrency(Math.max(0, amountDue(bill) - (bill.paidAmount || 0)), billCurrency)
                           : <span className="cell-empty">—</span>}
