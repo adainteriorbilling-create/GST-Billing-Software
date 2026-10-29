@@ -401,7 +401,7 @@ const CSS = `
 .ada-header-top { display: grid; grid-template-columns: 1fr 1.2fr 1fr; align-items: start; }
 .ada-idbox { font-weight: 700; font-size: 13px; line-height: 1.35; }
 .ada-hc { display: flex; justify-content: center; }
-.ada-frame { border: 1px solid #000; padding: 2px 14px; text-align: center; }
+.ada-frame { border: 0; padding: 2px 14px; text-align: center; }
 .ada-frame-title { font-weight: 700; font-size: 15px; }
 .ada-frame-sub { font-weight: 700; font-size: 11px; }
 .ada-hr { text-align: right; font-weight: 700; font-size: 13px; line-height: 1.5; }
