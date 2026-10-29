@@ -12,11 +12,12 @@ import { INVOICE_TYPES, resolveLineDiscount } from '../utils';
 //   profile, client, details, items, totals, invoiceType, customTerms,
 //   customNotes, extraSections, options, previewOnly, cancelled
 //
-// Multi-copy printing: set options.printCopies = 3 (or options.multiCopy = true)
-// to render 3 A4 pages:
+// Copies: by default 3 A4 pages are rendered, each with its OWN label right
+// under "<<TAX INVOICE>>":
 //   1. (Original For Recipient)  2. (Duplicate For Transporter)
 //   3. (Triplicate For Supplier)
-// Otherwise a single "Original For Recipient" page is rendered.
+// Set options.printCopies = 1 (or 2) to render fewer copies. The PDF builder in
+// InvoiceGenerator captures every .ada-page as exactly ONE A4 sheet.
 // ============================================================================
 
 const SELLER = {
@@ -155,7 +156,8 @@ const InvoicePreview = React.forwardRef(({
     ? [details?.shippingAddress, details?.shippingCity, details?.shippingState].filter(Boolean).join(', ')
     : '';
 
-  const copyCount = (options.printCopies === 3 || options.multiCopy === true) ? 3 : 1;
+  const requestedCopies = Number(options.printCopies);
+  const copyCount = (requestedCopies >= 1 && requestedCopies <= 3) ? requestedCopies : 3;
   const copies = COPY_LABELS.slice(0, copyCount);
 
   return (
@@ -167,28 +169,27 @@ const InvoicePreview = React.forwardRef(({
     >
       <style>{CSS}</style>
 
-      {cancelled && (
-        <div aria-hidden="true" style={{
-          position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          pointerEvents: 'none', zIndex: 5,
-        }}>
-          <span style={{
-            transform: 'rotate(-24deg)', whiteSpace: 'nowrap',
-            fontSize: '3.6rem', fontWeight: 800, letterSpacing: '0.18em',
-            color: 'rgba(220, 38, 38, 0.22)',
-            border: '6px solid rgba(220, 38, 38, 0.22)', borderRadius: 14,
-            padding: '0.3rem 1.6rem',
-          }}>CANCELLED</span>
-        </div>
-      )}
-
       {copies.map((copyLabel, copyIdx) => (
         <div
           key={copyLabel}
           className={`ada-page${copyIdx < copies.length - 1 ? ' ada-page-break' : ''}`}
           data-pdf-page={`copy-${copyIdx + 1}`}
         >
+          {cancelled && (
+            <div aria-hidden="true" style={{
+              position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              pointerEvents: 'none', zIndex: 5,
+            }}>
+              <span style={{
+                transform: 'rotate(-24deg)', whiteSpace: 'nowrap',
+                fontSize: '3.6rem', fontWeight: 800, letterSpacing: '0.18em',
+                color: 'rgba(220, 38, 38, 0.22)',
+                border: '6px solid rgba(220, 38, 38, 0.22)', borderRadius: 14,
+                padding: '0.3rem 1.6rem',
+              }}>CANCELLED</span>
+            </div>
+          )}
           <div className="ada-sheet">
             {/* ---------------- HEADER ---------------- */}
             <div className="ada-header">
@@ -368,10 +369,9 @@ const InvoicePreview = React.forwardRef(({
 
 // ----------------------------------------------------------------------------
 const CSS = `
-@page { size: A4 portrait; margin: 8mm; }
-
 .ada-root, .ada-root * { box-sizing: border-box; }
 .ada-page {
+  position: relative;
   width: 210mm;
   min-height: 297mm;
   padding: 8mm;
@@ -388,7 +388,9 @@ const CSS = `
 .ada-mono { font-family: 'Courier New', monospace; font-size: 13px; font-weight: 700; }
 
 @media print {
-  .ada-page { width: auto; min-height: 281mm; padding: 0; margin: 0; }
+  /* The 8mm gap around the frame is the page margin. The app-wide print rule
+     sets @page margin to 0, so the margin is kept here, inside the page. */
+  .ada-page { width: 210mm; min-height: 296mm; padding: 8mm; margin: 0; }
   .ada-page-break { page-break-after: always; break-after: page; }
   .ada-sheet { break-inside: avoid; }
   .ada-root, .ada-root * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
