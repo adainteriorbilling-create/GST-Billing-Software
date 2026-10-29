@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { FileText, Trash2, Plus, IndianRupee, Receipt, Edit3, TrendingUp, Search, Copy, X, CheckCircle, Clock, AlertTriangle, MessageCircle, Mail, StickyNote, Send, Package, Download, Printer, Ban, Undo2, Eye } from 'lucide-react';
 import HelpButton from './HelpButton';
-import { getAllBills, saveBill, getAllProducts, applyStockChanges, getProfile, getAllClients, getStockAlertSettings, saveReceipt, deleteReceipt, getAllReceipts, markSavedPdfCancelled } from '../store';
+import { getAllBills, saveBill, deleteBill, getAllProducts, applyStockChanges, getProfile, getAllClients, getStockAlertSettings, saveReceipt, deleteReceipt, getAllReceipts, markSavedPdfCancelled, trashSavedPdf, releaseClientAdvance, reapplyClientAdvance, adjustClientAdvance, clientAdvanceUsedOn } from '../store';
 import { formatCurrency, INVOICE_TYPES, getFYOptions, numberToWords, belongsToProfile, salesSign, isCancelledBill, markPaidPatch, markUnpaidPatch, stockEffect, appliedStock, stockDelta, SALES_INVOICE_TYPES, localToday, amountDue, paymentStatusFor } from '../utils';
 import { openWhatsAppShare } from '../utils/share';
 import PageHeader from './PageHeader';
@@ -77,7 +77,12 @@ const PAYMENT_MODES = [
   ['bank-transfer', 'Bank Transfer'], ['upi', 'UPI'], ['cash', 'Cash'],
   ['cheque', 'Cheque'], ['card', 'Card'], ['other', 'Other'],
 ];
-const paymentModeName = (mode) => (PAYMENT_MODES.find(([v]) => v === mode) || [])[1] || mode;
+const paymentModeName = (mode) => mode === 'credit-applied' ? 'Advance adjusted'
+  : mode === 'credit-transferred-out' ? 'Credit moved out'
+    : (PAYMENT_MODES.find(([v]) => v === mode) || [])[1] || mode;
+// Advance (client credit) adjusted on an invoice - counted once, from its own payments.
+const advanceOn = (bill) => (bill?.status === 'cancelled' ? 0
+  : Math.round((bill?.payments || []).filter((p) => p?.mode === 'credit-applied').reduce((s, p) => s + (Number(p.amount) || 0), 0) * 100) / 100);
 
 // v1.10.6 — audit L4: was a local copy of getFYOptions. Now imported
 // from ../utils so a bugfix touches one file, not five.
@@ -505,6 +510,56 @@ export default function Dashboard({ onNew, onEdit, onPrint, onDuplicate, onConve
     if (failed) toast(`${failed === 1 ? 'A saved PDF' : `${failed} saved PDFs`} could not be ${cancelled ? 'marked CANCELLED' : 'put back'}. Close the PDF if it is open, then ${cancelled ? 'cancel' : 'undo'} again.`, 'warning', 8000);
   };
 
+  // The client advance follows the invoice: cancelling it gives the advance
+  // back to the client, undoing the cancel puts it on again. Both are safe to
+  // repeat (they look at the client's advance entries).
+  const syncAdvance = async (bill, nowCancelled) => {
+    if (!bill?.clientName) return;
+    const cur = bill.currency || bill.data?.invoiceOptions?.currency || 'INR';
+    try {
+      if (nowCancelled) {
+        const r = await releaseClientAdvance({ clientName: bill.clientName, billId: bill.id, reason: 'invoice cancelled' });
+        if (r.released > 0.005) toast(`${formatCurrency(r.released, cur)} advance returned to ${bill.clientName}`, 'info');
+      } else {
+        const want = clientAdvanceUsedOn(bill);
+        const r = await reapplyClientAdvance({ bill });
+        if (r.applied > 0.005 && r.applied < want - 0.005) {
+          toast(`Only ${formatCurrency(r.applied, cur)} of the ${formatCurrency(want, cur)} advance is still available for ${bill.clientName}. Check Clients > Advance.`, 'warning', 8000);
+        }
+      }
+    } catch (err) {
+      console.error('Advance sync failed:', err);
+      toast('Invoice saved, but the client advance balance could not be updated. Check Clients > Advance.', 'warning', 8000);
+    }
+  };
+
+  // Delete: moves the invoice to the Trash (30 days). The server-side delete in
+  // store.deleteBill also gives its client advance back. Stock goes back as on cancel.
+  const handleDeleteInvoice = async (bill) => {
+    const cur = bill.currency || bill.data?.invoiceOptions?.currency || 'INR';
+    const adv = isCancelledBill(bill) ? 0 : clientAdvanceUsedOn(bill);
+    if (!await confirmAction({
+      title: 'Delete this invoice?',
+      message: `Invoice ${bill.invoiceNumber} for ${bill.clientName} moves to Trash for 30 days (Settings → Backup Management → Trash bin).`
+        + (adv > 0.005 ? ` The ${formatCurrency(adv, cur)} advance it used goes back to ${bill.clientName}'s advance balance.` : ''),
+      confirmLabel: 'Delete',
+      tone: 'danger',
+    })) return;
+    const returned = bill.data ? appliedStock(bill) : {};
+    const moves = Object.keys(returned).length > 0;
+    try {
+      if (moves) await saveBill({ ...bill, data: { ...bill.data, stockApplied: {}, stockReturnedOnDelete: returned } }, { overwrite: true });
+      try { await deleteBill(bill.id); }
+      catch (err) { if (moves) await saveBill(bill, { overwrite: true }).catch(() => {}); throw err; }
+      if (moves) await applyStockChanges(stockDelta(returned, {})).catch(() => toast('Invoice deleted, but its stock could not be put back. Check Products.', 'warning'));
+      trashSavedPdf(bill).catch(() => {});
+      toast('Invoice deleted', 'success');
+      loadBills();
+    } catch (err) {
+      toast(err?.body?.message || 'Failed to delete', 'error', 8000);
+    }
+  };
+
   const handleCancelInvoice = async (bill) => {
     if (isCancelledBill(bill)) return;
     const ok = await confirmAction({
@@ -518,6 +573,7 @@ export default function Dashboard({ onNew, onEdit, onPrint, onDuplicate, onConve
         const [res] = await saveWithStock([planStock(bill, 'cancelled')], (b) => ({ ...b, status: 'cancelled', cancelledAt: new Date().toISOString() }));
         if (res.status === 'rejected') throw res.reason;
         syncSavedPdfs([bill], true);
+        await syncAdvance(bill, true);
         toast('Invoice cancelled & stock restored', 'success');
         loadBills();
       } catch { toast('Failed to cancel', 'error'); }
@@ -548,7 +604,10 @@ export default function Dashboard({ onNew, onEdit, onPrint, onDuplicate, onConve
       if (p.id) deleteReceipt(p.id).catch(() => {});
     }
     try { await moveStock([plan]); } catch { /* the status change is saved */ }
-    if (isCancelledBill(bill) !== (updated.status === 'cancelled')) syncSavedPdfs([bill], updated.status === 'cancelled');
+    if (isCancelledBill(bill) !== (updated.status === 'cancelled')) {
+      syncSavedPdfs([bill], updated.status === 'cancelled');
+      await syncAdvance(bill, updated.status === 'cancelled');
+    }
     toast(updated.status === newStatus
       ? `Marked as ${STATUS_CONFIG[newStatus].label}`
       : `Payments recorded with a receipt remain, so it is ${STATUS_CONFIG[updated.status]?.label || updated.status}`, 'info');
@@ -669,17 +728,31 @@ export default function Dashboard({ onNew, onEdit, onPrint, onDuplicate, onConve
   // index directly. Modern rows still have ids for the receipt modal
   // to reference, but mutation is index-based.
   const deletePaymentAt = async (bill, idx) => {
+    const target = (bill.payments || [])[idx];
+    // Advance taken from an earlier overpaid invoice is tied to that invoice:
+    // taking it off here would break the link, so it is not removable here.
+    if (target?.mode === 'credit-applied' && target?.creditFrom !== 'client-advance') {
+      toast('This credit came from an earlier overpaid invoice and cannot be removed here. Cancel or delete this invoice instead.', 'warning', 8000);
+      return;
+    }
+    const isAdvance = target?.mode === 'credit-applied';
     if (!await confirmAction({
-      title: 'Delete this payment?',
-      message: 'The invoice will revert to unpaid/partial if the sum drops below the total.',
-      confirmLabel: 'Delete payment',
+      title: isAdvance ? 'Take the advance off this invoice?' : 'Delete this payment?',
+      message: isAdvance
+        ? `The ${formatCurrency(target.amount, bill.currency || 'INR')} advance goes back to ${bill.clientName}'s advance balance, and the invoice shows it as unpaid again.`
+        : 'The invoice will revert to unpaid/partial if the sum drops below the total.',
+      confirmLabel: isAdvance ? 'Take it off' : 'Delete payment',
       tone: 'danger',
     })) return;
-    const target = (bill.payments || [])[idx];
     const payments = (bill.payments || []).filter((_, i) => i !== idx);
     const totalPaid = payments.reduce((s, p) => s + (Number(p.amount) || 0), 0);
     const updated = { ...bill, payments, paidAmount: totalPaid, status: paymentStatusFor(bill, totalPaid) };
     await saveBill(updated, { overwrite: true });
+    if (isAdvance) {
+      try {
+        await adjustClientAdvance({ clientName: bill.clientName, billId: bill.id, newAmount: clientAdvanceUsedOn(updated), reason: 'advance taken off the invoice' });
+      } catch { toast('Advance removed from the invoice, but the client advance balance could not be updated. Check Clients > Advance.', 'warning', 8000); }
+    }
     // v1.10.10 — Also remove the linked Receipt record so the Receipts
     // page stays in sync. Silently skips if this was a legacy payment
     // that never had a receipt written (pre-v1.10.10 recordings).
@@ -826,6 +899,7 @@ export default function Dashboard({ onNew, onEdit, onPrint, onDuplicate, onConve
       const failed = results.filter(r => r.status === 'rejected').length;
       const done = sel.filter((_, i) => results[i]?.status !== 'rejected');
       syncSavedPdfs(done.filter((b) => isCancelledBill(b)), false);
+      for (const b of done.filter((x) => isCancelledBill(x))) await syncAdvance(b, false);
       if (newStatus === 'unpaid') {
         for (const b of done) {
           const kept = markUnpaidPatch(b).payments;
@@ -854,7 +928,9 @@ export default function Dashboard({ onNew, onEdit, onPrint, onDuplicate, onConve
       const at = new Date().toISOString();
       const results = await saveWithStock(sel.map((b) => planStock(b, 'cancelled')), (b) => ({ ...b, status: 'cancelled', cancelledAt: at }));
       const failed = results.filter(r => r.status === 'rejected').length;
-      syncSavedPdfs(sel.filter((_, i) => results[i]?.status !== 'rejected'), true);
+      const cancelledOk = sel.filter((_, i) => results[i]?.status !== 'rejected');
+      syncSavedPdfs(cancelledOk, true);
+      for (const b of cancelledOk) await syncAdvance(b, true);
       if (failed > 0) toast(`${sel.length - failed} cancelled, ${failed} failed`, 'warning');
       else toast(`Cancelled ${sel.length} invoice${sel.length !== 1 ? 's' : ''}`, 'success');
       clearSelection();
@@ -1558,7 +1634,9 @@ export default function Dashboard({ onNew, onEdit, onPrint, onDuplicate, onConve
                   {visibleColumns.currency && <th>Currency</th>}
                   {visibleColumns.dueDate && <th>Due Date</th>}
                   {visibleColumns.printed && <th>Printed</th>}
-                  <th className="col-center">Paid</th>
+                  <th className="col-center" title="Cash and advance received on the invoice">Paid</th>
+                  <th className="col-center" title="Client advance adjusted on this invoice">Advance</th>
+                  <th className="col-center" title="Amount still to receive">Balance</th>
                   {visibleColumns.status && <th className="col-center">Status</th>}
                   {visibleColumns.actions && <th className="col-center">Actions</th>}
                 </tr>
@@ -1600,6 +1678,12 @@ export default function Dashboard({ onNew, onEdit, onPrint, onDuplicate, onConve
                       {visibleColumns.dueDate && <td className="text-muted">{bill.data?.details?.dueDate ? new Date(bill.data.details.dueDate).toLocaleDateString('en-IN') : <span className="cell-empty">—</span>}</td>}
                       {visibleColumns.printed && <td className="text-muted" style={{ textAlign: 'center' }}>{Number(bill.printedCount) || 0}×</td>}
                       <td className="text-muted col-center">{(bill.paidAmount || 0) > 0 ? formatCurrency(bill.paidAmount, billCurrency) : <span className="cell-empty">—</span>}</td>
+                      <td className="col-center" style={{ color: '#0369a1' }}>{advanceOn(bill) > 0.005 ? '− ' + formatCurrency(advanceOn(bill), billCurrency) : <span className="cell-empty">—</span>}</td>
+                      <td className="col-center font-bold" style={{ color: (amountDue(bill) - (bill.paidAmount || 0)) > 0.005 ? '#dc2626' : '#059669' }}>
+                        {tracksPayment && status !== 'cancelled'
+                          ? formatCurrency(Math.max(0, amountDue(bill) - (bill.paidAmount || 0)), billCurrency)
+                          : <span className="cell-empty">—</span>}
+                      </td>
                       {visibleColumns.status && <td className="col-center">
                         {/* v1.10.77 (#86) - a cancelled document is read-only: its status
                             menu is locked, with Undo to bring it back. */}
@@ -1660,6 +1744,8 @@ export default function Dashboard({ onNew, onEdit, onPrint, onDuplicate, onConve
                             { label: 'Email', icon: Mail, onClick: () => shareEmail(bill), hidden: readOnly },
                             { label: 'Cancel invoice', icon: Ban, tone: 'danger', onClick: () => handleCancelInvoice(bill), hidden: readOnly,
                               title: 'Cancel invoice — keeps the number; Undo from the Status column' },
+                            { label: 'Delete', icon: Trash2, tone: 'danger', onClick: () => handleDeleteInvoice(bill),
+                              title: 'Delete invoice — moves it to the Trash for 30 days; its advance goes back to the client' },
                           ]} />
                         </div>
                       </td>}
@@ -1749,12 +1835,14 @@ export default function Dashboard({ onNew, onEdit, onPrint, onDuplicate, onConve
                       <span className="text-muted" style={{ minWidth: 90 }}>{paymentModeName(p.mode)}</span>
                       {p.note && <span className="text-muted" style={{ flex: 1 }}>· {p.note}</span>}
                       <div style={{ marginLeft: 'auto', display: 'flex', gap: '0.25rem' }}>
+                        {p.mode !== 'credit-applied' && p.mode !== 'credit-transferred-out' && <>
                         <button className="btn btn-secondary" style={{ fontSize: '0.7rem', padding: '0.2rem 0.5rem' }}
                           onClick={() => openReceiptFor(paymentModal, p)}
                           title="View / Print receipt for this payment"><Receipt size={12} /> Receipt</button>
                         <button className="btn btn-secondary" style={{ fontSize: '0.7rem', padding: '0.2rem 0.5rem' }}
                           onClick={() => editPaymentAt(paymentModal, i)}
                           title="Edit amount / date / mode / note"><Edit3 size={12} /></button>
+                        </>}
                         <button className="btn btn-secondary" style={{ fontSize: '0.7rem', padding: '0.2rem 0.5rem', color: 'var(--danger)', borderColor: 'var(--danger)' }}
                           onClick={() => deletePaymentAt(paymentModal, i)}
                           title="Delete this payment"><Trash2 size={12} /></button>
