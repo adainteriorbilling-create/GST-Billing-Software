@@ -2310,10 +2310,17 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
     // ------------------------------------------------------------------
     const adaPageEls = Array.from(printRef.current.querySelectorAll('.ada-page'));
     if (adaPageEls.length > 0 && !isThermalPdf) {
+      // Speed: the generic HD print setting (PNG at up to 6x) made 3 copies take
+      // about a minute. An A4 page at 3x is ~300 dpi - sharp for printed text -
+      // and JPEG keeps the file small and fast to encode.
+      const adaScale = 3;
+      const adaFormat = 'JPEG';
+      const adaQuality = 0.95;
       for (let i = 0; i < adaPageEls.length; i++) {
         const pageEl = adaPageEls[i];
         const c = await html2canvas(pageEl, {
           ...captureOptions(pageEl),
+          scale: adaScale,
           onclone: (clonedDoc) => {
             try {
               const css = collectDocumentStyles();
@@ -2327,7 +2334,7 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
             clonedDoc.querySelectorAll('*').forEach(n => { n.style.letterSpacing = '0px'; n.style.wordSpacing = '0px'; });
           },
         });
-        const adaImg = c.toDataURL(imgFormat === 'PNG' ? 'image/png' : 'image/jpeg', jpegQuality);
+        const adaImg = c.toDataURL('image/jpeg', adaQuality);
         // A normal copy is exactly A4. A very long item list makes the page
         // taller than A4; shrink it uniformly (aspect ratio kept) to fit.
         let drawW = pdfWidth;
@@ -2338,7 +2345,7 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
           drawH = pdfPageHeight;
         }
         if (i > 0) pdf.addPage();
-        pdf.addImage(adaImg, imgFormat, (pdfWidth - drawW) / 2, 0, drawW, drawH, undefined, 'MEDIUM');
+        pdf.addImage(adaImg, adaFormat, (pdfWidth - drawW) / 2, 0, drawW, drawH, undefined, 'FAST');
       }
       return pdf;
     }
