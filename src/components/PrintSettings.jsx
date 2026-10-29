@@ -180,6 +180,24 @@ const DESIGN_PRESETS = [
       showHSN: true,
     },
   },
+  {
+    id: 'ada_interiors',
+    name: 'Ada Interiors Custom',
+    icon: '▣',
+    description: 'Ruled industrial GST tax invoice with SGST/CGST columns, bank box and signatures.',
+    tag: 'Ada Interiors · A4',
+    settings: {
+      pdfTemplate: 'ada_interiors',
+      userColorsEnabled: true,
+      pdfPrimaryText: '#000000', pdfMutedText: '#404040',
+      pdfAccent: '#000000', pdfAccentText: '#ffffff',
+      pdfHeaderBg: '#ffffff', pdfDividerColor: '#000000',
+      fontFamily: 'sans', fontWeight: 'bold', fontSize: 'medium',
+      lineSpacing: 'normal', allCaps: false,
+      headerAlign: 'left', headerCaps: true, contrast: 'high',
+      showHSN: true,
+    },
+  },
 ];
 
 // ============================================================================
@@ -1048,6 +1066,7 @@ export default function PrintSettings() {
                 ['minimalist', 'Minimalist (grayscale + Inter)'],
                 ['boxed', 'Boxed grid (ruled boxes, like a quotation pad)'],
                 ['tally', 'Tally style (order boxes, HSN tax summary, declaration)'],
+                ['ada_interiors', 'Ada Interiors Custom'],
               ]}
               hint="Changes the header block and table styling of the A4/A5 PDF. Thermal receipts use their own compact template." />
           </SettingGroup>
