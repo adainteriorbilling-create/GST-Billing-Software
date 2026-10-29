@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Download, RefreshCw, Package, FolderOpen, HardDrive, StopCircle, Upload, AlertCircle, CheckCircle } from 'lucide-react';
+import { Download, Package, FolderOpen, HardDrive, StopCircle, Upload, AlertCircle, CheckCircle } from 'lucide-react';
 import PageHeader from './PageHeader';
 import { toast } from './Toast';
 import HelpButton from './HelpButton';
@@ -99,7 +99,6 @@ export default function ControlPanel() {
       >
         <HelpButton title="Control Panel — how to use" doc="control-panel">
           <ul style={{ paddingLeft: '1.1rem', margin: 0 }}>
-            <li><strong>Update Now</strong> backs up your data, then installs the latest version.</li>
             <li><strong>Create Backup</strong> saves your data as a ZIP in Documents → FreeGSTBill Backups.</li>
             <li><strong>Export for Move</strong> and <strong>Choose Backup ZIP</strong> move your books to another PC.</li>
             <li><strong>Stop Server</strong> stops the app; open it again from the launcher.</li>
@@ -130,15 +129,6 @@ export default function ControlPanel() {
       )}
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '1rem' }}>
-        <ActionCard
-          icon={<RefreshCw size={22} />}
-          title="Update Software"
-          body="Pull the latest release from GitHub. Your data folder is snapshotted first and never touched."
-          buttonLabel={label('update', 'Update Now', 'Updating…')}
-          disabled={!!busy || !can('update')}
-          onClick={() => launchScript('update')}
-          variant="primary"
-        />
         <ActionCard
           icon={<Download size={22} />}
           title="Backup Data"
