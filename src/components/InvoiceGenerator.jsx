@@ -2296,6 +2296,53 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
       height: el.scrollHeight,
     });
 
+    // ------------------------------------------------------------------
+    // ADA INTERIORS template: every `.ada-page` inside the preview is ONE
+    // complete A4 sheet (copy 1 / 2 / 3, each with its own label under
+    // "<<TAX INVOICE>>"). So each page is captured on its own and placed on
+    // its own PDF page. Nothing here may add a sheet:
+    //   - no capture of the (empty) preview wrapper  -> no blank first sheet
+    //   - no multi-copy replay + corner stamp         -> no 3 x 2 = 6 sheets
+    //   - no page-2+ business header / "Page x of y"  -> nothing drawn over a copy
+    // The 8mm margin is part of the page itself (.ada-page padding), so the
+    // image is placed at 0,0 at full A4 size and the margin stays the same on
+    // screen, in the PDF and on paper.
+    // ------------------------------------------------------------------
+    const adaPageEls = Array.from(printRef.current.querySelectorAll('.ada-page'));
+    if (adaPageEls.length > 0 && !isThermalPdf) {
+      for (let i = 0; i < adaPageEls.length; i++) {
+        const pageEl = adaPageEls[i];
+        const c = await html2canvas(pageEl, {
+          ...captureOptions(pageEl),
+          onclone: (clonedDoc) => {
+            try {
+              const css = collectDocumentStyles();
+              if (css) {
+                const styleEl = clonedDoc.createElement('style');
+                styleEl.setAttribute('data-fgsb-inlined', '1');
+                styleEl.textContent = css;
+                (clonedDoc.head || clonedDoc.documentElement).appendChild(styleEl);
+              }
+            } catch { /* never block the capture over styling */ }
+            clonedDoc.querySelectorAll('*').forEach(n => { n.style.letterSpacing = '0px'; n.style.wordSpacing = '0px'; });
+          },
+        });
+        const adaImg = c.toDataURL(imgFormat === 'PNG' ? 'image/png' : 'image/jpeg', jpegQuality);
+        // A normal copy is exactly A4. A very long item list makes the page
+        // taller than A4; shrink it uniformly (aspect ratio kept) to fit.
+        let drawW = pdfWidth;
+        let drawH = (c.height * pdfWidth) / c.width;
+        if (drawH > pdfPageHeight) {
+          const k = pdfPageHeight / drawH;
+          drawW = pdfWidth * k;
+          drawH = pdfPageHeight;
+        }
+        if (i > 0) pdf.addPage();
+        pdf.addImage(adaImg, imgFormat, (pdfWidth - drawW) / 2, 0, drawW, drawH, undefined, 'MEDIUM');
+      }
+      return pdf;
+    }
+
     // Hide extra pages, capture main invoice.
     // v1.10.8 — audit M21 real fix. Prior code stamped the same tall
     // canvas at successive negative-Y offsets. Any row straddling a
