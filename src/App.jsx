@@ -1,5 +1,5 @@
-app ne jo code diya hai kuch miisng na ho muje batao me code kudh dete karva deta hu ya vo fulll code deta hu app bus utna hissa hat ke de diimport { useState, useEffect, useRef, useMemo, lazy, Suspense } from 'react';
-import { Home, FileText, Settings, Plus, Users, Package, BarChart3, Wallet, RefreshCw, Receipt, BookOpen, Moon, Sun, Download, X, ShoppingCart, ChevronDown, Building2, Pencil, Search, Command, Bell, Calculator, HardDrive, Menu } from 'lucide-react';
+import { useState, useEffect, useRef, useMemo, lazy, Suspense } from 'react';
+import { Home, FileText, Settings, Plus, Users, Package, BarChart3, Wallet, RefreshCw, Receipt, BookOpen, Moon, Sun, Download, X, ShoppingCart, ChevronDown, Building2, Pencil, Search, Command, Bell, Calculator, HardDrive, Menu, History } from 'lucide-react';
 import { getAllProfiles, saveProfile, getEnabledModules, getAllBills, getAllProducts, getStockAlertSettings, getAllClients, runUpdateNow, getLockStatus } from './store';
 import { isModuleEnabled, getUpcomingFilings, countsAsSales, localToday, toLocalIsoDate } from './utils';
 // v1.10.4 — Route-level lazy loading. Prior App.jsx synchronously
@@ -56,6 +56,124 @@ function ViewLoading() {
   );
 }
 
+// Invoice History — full list of every saved bill with search + status filter.
+// Reuses the existing handlers from App (open / print / duplicate), so nothing
+// else in the app is touched.
+function InvoiceHistory({ onNew, onEdit, onPrint, onDuplicate }) {
+  const [bills, setBills] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [query, setQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState('all');
+
+  useEffect(() => {
+    let cancelled = false;
+    getAllBills()
+      .then((list) => { if (!cancelled) setBills(Array.isArray(list) ? list : []); })
+      .catch(() => { if (!cancelled) setBills([]); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, []);
+
+  const billDate = (b) => b.invoiceDate || b.data?.details?.invoiceDate || b.createdAt || '';
+  const billAmount = (b) => {
+    const v = b.total ?? b.grandTotal ?? b.amount ?? b.data?.totals?.grandTotal ?? b.data?.grandTotal ?? b.data?.total;
+    const n = Number(v);
+    return v === undefined || v === null || Number.isNaN(n) ? null : n;
+  };
+  const statusOf = (b) => String(b.status || 'unpaid').toLowerCase();
+
+  const statuses = useMemo(() => Array.from(new Set(bills.map(statusOf))), [bills]);
+
+  const rows = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return bills
+      .filter((b) => statusFilter === 'all' || statusOf(b) === statusFilter)
+      .filter((b) => !q
+        || String(b.invoiceNumber || '').toLowerCase().includes(q)
+        || String(b.clientName || '').toLowerCase().includes(q))
+      .sort((a, b) => String(billDate(b)).localeCompare(String(billDate(a))));
+  }, [bills, query, statusFilter]);
+
+  const fmtDate = (d) => {
+    if (!d) return '—';
+    const dt = new Date(d);
+    return Number.isNaN(dt.getTime()) ? String(d) : dt.toLocaleDateString('en-IN');
+  };
+  const fmtAmt = (n) => (n === null ? '—' : '₹' + n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+
+  const th = { textAlign: 'left', padding: '0.6rem 0.75rem', fontSize: '0.75rem', color: 'var(--text-muted)', borderBottom: '1px solid var(--border-color)', whiteSpace: 'nowrap' };
+  const td = { padding: '0.6rem 0.75rem', fontSize: '0.88rem', borderBottom: '1px solid var(--border-color)', color: 'var(--text-primary)' };
+
+  return (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem', flexWrap: 'wrap', marginBottom: '1rem' }}>
+        <h2 className="section-title" style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+          <History size={20} /> Invoice History
+        </h2>
+        <button type="button" className="btn btn-primary" onClick={onNew}>
+          <Plus size={16} /> New Invoice
+        </button>
+      </div>
+
+      <div style={{ display: 'flex', gap: '0.6rem', flexWrap: 'wrap', marginBottom: '1rem' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flex: '1 1 240px' }}>
+          <Search size={16} style={{ color: 'var(--text-muted)' }} />
+          <input type="text" className="form-input" placeholder="Search by invoice no. or client…"
+            value={query} onChange={(e) => setQuery(e.target.value)} style={{ flex: 1 }} />
+        </div>
+        <select className="form-input" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} style={{ width: 'auto' }}>
+          <option value="all">All statuses</option>
+          {statuses.map((s) => <option key={s} value={s}>{s.charAt(0).toUpperCase() + s.slice(1)}</option>)}
+        </select>
+      </div>
+
+      <div className="surface-card" style={{ padding: 0, overflowX: 'auto' }}>
+        {loading ? (
+          <p style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '2rem', margin: 0 }}>Loading…</p>
+        ) : rows.length === 0 ? (
+          <p style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '2rem', margin: 0 }}>
+            {bills.length === 0 ? 'No invoices yet.' : 'No invoices match your search.'}
+          </p>
+        ) : (
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <thead>
+              <tr>
+                <th style={th}>Invoice #</th>
+                <th style={th}>Client</th>
+                <th style={th}>Date</th>
+                <th style={{ ...th, textAlign: 'right' }}>Amount</th>
+                <th style={th}>Status</th>
+                <th style={{ ...th, textAlign: 'right' }}>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((b) => (
+                <tr key={b.id || b.invoiceNumber}>
+                  <td style={{ ...td, fontWeight: 600 }}>{b.invoiceNumber || '—'}</td>
+                  <td style={td}>{b.clientName || 'No client'}</td>
+                  <td style={td}>{fmtDate(billDate(b))}</td>
+                  <td style={{ ...td, textAlign: 'right' }}>{fmtAmt(billAmount(b))}</td>
+                  <td style={{ ...td, textTransform: 'capitalize' }}>{statusOf(b)}</td>
+                  <td style={{ ...td, textAlign: 'right', whiteSpace: 'nowrap' }}>
+                    <button type="button" className="btn btn-secondary" style={{ fontSize: '0.78rem', padding: '0.25rem 0.6rem', marginRight: 4 }} onClick={() => onEdit(b)}>Open</button>
+                    <button type="button" className="btn btn-secondary" style={{ fontSize: '0.78rem', padding: '0.25rem 0.6rem', marginRight: 4 }} onClick={() => onPrint(b)}>Print</button>
+                    <button type="button" className="btn btn-secondary" style={{ fontSize: '0.78rem', padding: '0.25rem 0.6rem' }} onClick={() => onDuplicate(b)}>Duplicate</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+      {!loading && rows.length > 0 && (
+        <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.5rem' }}>
+          Showing {rows.length} of {bills.length} invoice{bills.length !== 1 ? 's' : ''}
+        </p>
+      )}
+    </div>
+  );
+}
+
 function App() {
   // v1.9.3 — Setup Wizard shown on first-run (before onboardingComplete = true)
   const [showWizard, setShowWizard] = useState(() => {
@@ -69,7 +187,7 @@ function App() {
       const params = new URLSearchParams(window.location.search);
       const v = params.get('view');
       // v1.10.74 - 'controlpanel' added so ?view=controlpanel deep links work too.
-      const valid = ['dashboard', 'new', 'clients', 'inventory', 'expenses', 'purchases', 'recurring', 'receipts', 'reports', 'filing', 'incometax', 'settings', 'controlpanel'];
+      const valid = ['dashboard', 'new', 'clients', 'inventory', 'expenses', 'purchases', 'recurring', 'receipts', 'reports', 'filing', 'incometax', 'settings', 'controlpanel', 'history'];
       if (v && valid.includes(v)) {
         // Strip the query string so a refresh doesn't keep snapping back to
         // the shortcut target — only the *first* navigation honours it.
@@ -514,7 +632,7 @@ function App() {
   // If the user just disabled the module backing the current view, kick them to dashboard
   // so they don't land on an empty page after toggling.
   useEffect(() => {
-    const map = { new: 'invoicing', clients: 'clients', inventory: 'inventory', expenses: 'expenses', purchases: 'purchases', recurring: 'recurring', receipts: 'receipts', reports: 'reports', filing: 'gstReturns' };
+    const map = { new: 'invoicing', history: 'invoicing', clients: 'clients', inventory: 'inventory', expenses: 'expenses', purchases: 'purchases', recurring: 'recurring', receipts: 'receipts', reports: 'reports', filing: 'gstReturns' };
     const moduleForView = map[currentView];
     if (moduleForView && !isModuleEnabled(moduleForView, enabledModules)) {
       setCurrentView('dashboard');
@@ -525,6 +643,7 @@ function App() {
   const navItems = [
     { id: 'dashboard', icon: Home, label: 'Dashboard', module: 'dashboard' },
     { id: 'new', icon: Plus, label: 'New Invoice', onClick: handleNewInvoice, module: 'invoicing' },
+    { id: 'history', icon: History, label: 'Invoice History', module: 'invoicing' },
     { id: 'clients', icon: Users, label: 'Clients', module: 'clients' },
     { id: 'inventory', icon: Package, label: 'Products', module: 'inventory' },
     { id: 'expenses', icon: Wallet, label: 'Expenses', module: 'expenses' },
@@ -980,6 +1099,9 @@ function App() {
         {currentView !== 'new' && <StarBanner />}
         {currentView === 'dashboard' && (
           <Dashboard onNew={handleNewInvoice} onEdit={handleEditInvoice} onPrint={handlePrintInvoice} onDuplicate={handleDuplicateInvoice} onConvert={handleConvertToInvoice} onOpenProducts={() => setCurrentView('inventory')} onOpenSettings={() => setCurrentView('settings')} activeProfile={profile} />
+        )}
+        {currentView === 'history' && (
+          <InvoiceHistory key={businessKey} onNew={handleNewInvoice} onEdit={handleEditInvoice} onPrint={handlePrintInvoice} onDuplicate={handleDuplicateInvoice} />
         )}
         {currentView === 'new' && (
           <InvoiceGenerator
