@@ -1,7 +1,7 @@
 // File-based storage via local Express API server
 // All data persists as JSON files in the ./data/ folder
 
-import { getFinancialYearLabel, parseLocalDate, nextCounterValue, startFor, numberSeriesFor, counterKeyFor, formatDocNumber, INVOICE_TYPES, savedPdfNameFor } from './utils';
+import { localToday, getFinancialYearLabel, parseLocalDate, nextCounterValue, startFor, numberSeriesFor, counterKeyFor, formatDocNumber, INVOICE_TYPES, savedPdfNameFor } from './utils';
 
 const API = '/api';
 
@@ -555,6 +555,12 @@ export const importData = async (jsonString, selection) => {
 // /api/clients route (saveClient), so it rides along in backups and restores.
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 const sumAdvances = (list) => round2((list || []).reduce((s, a) => s + (Number(a.amount) || 0), 0));
+// Advance already used up on invoices (client.advanceApplied[]). Kept apart from
+// client.advances[] so the advance receipts (ADV-0001 ...) stay untouched.
+const sumApplied = (list) => round2((list || []).reduce((s, a) => s + (Number(a.amount) || 0), 0));
+// What is still available: everything received minus everything used on invoices.
+export const advanceBalanceOf = (client) =>
+  Math.max(0, round2(sumAdvances(client?.advances) - sumApplied(client?.advanceApplied)));
 
 export async function addClientAdvance({ clientName, amount, mode, date, description = '' }) {
   const name = String(clientName || '').trim();
@@ -583,9 +589,9 @@ export async function addClientAdvance({ clientName, amount, mode, date, descrip
     mode,
     description,
     createdAt: new Date().toISOString(),
-    balanceAfter: sumAdvances(prior) + amt,
+    balanceAfter: sumAdvances(prior) - sumApplied(existing?.advanceApplied) + amt,
   };
-  entry.balanceAfter = round2(entry.balanceAfter);
+  entry.balanceAfter = round2(Math.max(0, entry.balanceAfter));
 
   const record = {
     ...(existing || { name }),
@@ -601,7 +607,33 @@ export async function removeClientAdvance(clientId, advanceId) {
   const client = all.find((c) => c.id === clientId);
   if (!client) throw new Error('Client not found');
   const advances = (client.advances || []).filter((a) => a.id !== advanceId);
-  const record = { ...client, advances, creditBalance: sumAdvances(advances) };
+  const record = { ...client, advances };
+  record.creditBalance = advanceBalanceOf(record);
+  await saveClient(record);
+  return record;
+}
+
+// Use up part of a client's advance on an invoice. Reads the client fresh from
+// the server so it never overwrites a newer copy. Returns the updated client
+// record, or null when there is nothing to use.
+export async function applyClientAdvance({ clientName, amount, billId, invoiceNumber }) {
+  const lower = String(clientName || '').trim().toLowerCase();
+  if (!lower) return null;
+  const all = await getAllClients();
+  const client = all.find((c) => String(c.name || '').trim().toLowerCase() === lower);
+  if (!client) return null;
+  const take = round2(Math.min(Number(amount) || 0, advanceBalanceOf(client)));
+  if (!(take > 0)) return null;
+  const entry = {
+    id: `advuse_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
+    amount: take,
+    date: localToday(),
+    billId: billId || '',
+    invoiceNumber: invoiceNumber || billId || '',
+    createdAt: new Date().toISOString(),
+  };
+  const record = { ...client, advanceApplied: [...(client.advanceApplied || []), entry] };
+  record.creditBalance = advanceBalanceOf(record);
   await saveClient(record);
   return record;
 }
