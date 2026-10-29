@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback, useMemo, memo } from 'react';
 import { ArrowLeft, Plus, Trash2, Download, UserPlus, Pencil, Settings, ChevronUp, ChevronDown, MessageCircle, Check, Loader, Truck, Printer, Eye, EyeOff } from 'lucide-react';
 import { jsPDF } from 'jspdf';
 import html2canvas from 'html2canvas';
-import { saveBill, deleteBill, applyStockChanges, getNextInvoiceNumber, getTermsTemplates, getAllClients, saveClient, getProfile, getAllProducts, getInvoiceDisplayOptions, saveInvoiceDisplayOptions, getAllProfiles, getRegionMode, saveRecurring, getAllRecurring, getAllBills, advanceBalanceOf, applyClientAdvance } from '../store';
+import { saveBill, deleteBill, applyStockChanges, getNextInvoiceNumber, getTermsTemplates, getAllClients, saveClient, getProfile, getAllProducts, getInvoiceDisplayOptions, saveInvoiceDisplayOptions, getAllProfiles, getRegionMode, saveRecurring, getAllRecurring, getAllBills, advanceBalanceOf, applyClientAdvance, adjustClientAdvance, moveClientAdvance } from '../store';
 import { INVOICE_TYPES, businessKeyOf, GST_DOC_NUMBER, COUNTRIES, printedSubtotal, deliveryChargeLine, stockEffect, appliedStock, stockDelta, generateEWayBillJSON, formatCurrency, getCountryConfig, getStatesForCountry, getAllUnits, addCustomUnit, removeCustomUnit, getCountriesForRegion, TDS_SECTIONS, TCS_SECTIONS, REMOVED_TCS_SECTIONS, TERMS_PRESETS, getActiveAccounts, getDefaultAccount, getAccountById, getDefaultUnitForMode, filterUnitsByMode, PAPER_SIZES, getPaperSize, computeInvoiceTotals, clientYearToDate, htmlHasText, ORDER_DETAIL_FIELDS, invoiceOptionOn, DEFAULT_DECLARATION, decodeGstin, safePageBoundaries, localToday, toLocalIsoDate, parseLocalDate, paymentStatusFor } from '../utils';
 import { getPrintSettings, savePrintSettings } from '../utils/printSettings';
 import { openWhatsAppShare } from '../utils/share';
@@ -1797,6 +1797,27 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
     }
     if (creditPlan?.targetEntry) seedPayments.push(creditPlan.targetEntry);
     if (advanceEntry) seedPayments.push(advanceEntry);
+    // Editing an invoice: the client advance on it can never be more than what
+    // the invoice now owes after its other payments. If the total came down,
+    // the extra advance is cut here (and handed back to the client after the
+    // save, below). It is never raised on an edit, so nothing is taken twice.
+    const isAdvPay = (p) => p?.mode === 'credit-applied' && p?.creditFrom === 'client-advance';
+    const advanceBefore = r2(seedPayments.filter(isAdvPay).reduce((s, p) => s + (Number(p.amount) || 0), 0));
+    const otherPaid = r2(seedPayments.filter((p) => !isAdvPay(p)).reduce((s, p) => s + (Number(p.amount) || 0), 0));
+    const advanceAllowed = r2(Math.max(0, (Number(totals.total) || 0) - Math.max(0, otherPaid)));
+    let advanceKept = advanceBefore;
+    if (advanceBefore > advanceAllowed + 0.005) {
+      let excess = r2(advanceBefore - advanceAllowed);
+      const trimmed = seedPayments.map((p) => ({ ...p }));
+      for (let i = trimmed.length - 1; i >= 0 && excess > 0.005; i--) {
+        if (!isAdvPay(trimmed[i])) continue;
+        const cut = Math.min(Number(trimmed[i].amount) || 0, excess);
+        trimmed[i].amount = r2((Number(trimmed[i].amount) || 0) - cut);
+        excess = r2(excess - cut);
+      }
+      seedPayments.splice(0, seedPayments.length, ...trimmed.filter((p) => !(isAdvPay(p) && (Number(p.amount) || 0) <= 0.005)));
+      advanceKept = r2(seedPayments.filter(isAdvPay).reduce((s, p) => s + (Number(p.amount) || 0), 0));
+    }
     const seedPaidAmount = seedPayments.reduce((s, p) => s + (Number(p.amount) || 0), 0);
     // v1.10.41 — Recompute status from the merged paid amount rather
     // than trusting editingBill.status. If a payment was recorded on
@@ -2028,6 +2049,19 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
         toast('Advance is shown on this bill, but the client advance balance could not be updated. Please check Clients > Advance.', 'warning');
       }
     }
+    // The edit cut the advance on this invoice: hand the difference back to the
+    // client (the same entry is shortened, so it is never counted twice).
+    if (advanceKept < advanceBefore - 0.005 && !advanceEntry) {
+      try {
+        const adj = await adjustClientAdvance({ clientName: client.name, billId: savedNumber, newAmount: advanceKept, reason: 'invoice edited' });
+        if (adj.client) setSavedClients(prev => prev.map(c => c.id === adj.client.id ? adj.client : c));
+        if (adj.released > 0.005) toast(`${formatCurrency(adj.released, invoiceOptions.currency || 'INR')} advance returned to ${client.name}'s balance`, 'success');
+      } catch (advErr) {
+        console.error('Client advance adjust failed:', advErr);
+        toast('Invoice saved, but the client advance balance could not be updated. Please check Clients > Advance.', 'warning');
+      }
+      setLockedCredit(advanceKept);
+    }
     // The advance is now part of this saved bill: keep showing it (and stop
     // offering / re-applying credit on later saves).
     const totalCreditApplied = r2((creditPlan?.amountApplied || 0) + advancePart);
@@ -2040,7 +2074,9 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
       // the trashed copy records none: restoring it must not move it again.
       try {
         if (serverCopy?.data) await saveBill({ ...serverCopy, data: { ...serverCopy.data, stockApplied: {} } }, { overwrite: true });
-        await deleteBill(renameFrom);
+        // keepAdvance: the invoice lives on under its new number, advance and all.
+        await deleteBill(renameFrom, { keepAdvance: true });
+        await moveClientAdvance({ clientName: client.name, fromId: renameFrom, toId: savedNumber }).catch(() => {});
       }
       catch { toast(`Saved as ${savedNumber}, but the old copy ${renameFrom} could not be removed. Delete it from the Dashboard.`, 'warning', 8000); }
     }
