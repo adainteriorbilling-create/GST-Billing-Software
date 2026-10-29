@@ -622,6 +622,10 @@ export async function applyClientAdvance({ clientName, amount, billId, invoiceNu
   const all = await getAllClients();
   const client = all.find((c) => String(c.name || '').trim().toLowerCase() === lower);
   if (!client) return null;
+  // The same invoice never takes advance twice (a retried save, a double click):
+  // if it already has an entry, leave the client exactly as it is.
+  const key = String(billId || invoiceNumber || '');
+  if (key && (client.advanceApplied || []).some((a) => String(a.billId || a.invoiceNumber || '') === key)) return client;
   const take = round2(Math.min(Number(amount) || 0, advanceBalanceOf(client)));
   if (!(take > 0)) return null;
   const entry = {
@@ -636,4 +640,62 @@ export async function applyClientAdvance({ clientName, amount, billId, invoiceNu
   record.creditBalance = advanceBalanceOf(record);
   await saveClient(record);
   return record;
+}
+
+// ---- Client advance: giving it back / putting it on again ----
+// An invoice that used client advance has one entry in client.advanceApplied[]
+// (billId = the invoice number). Cancelling or deleting that invoice must give
+// the money back, or the client's advance stays "used" by an invoice that no
+// longer counts. Both functions below are safe to call twice: they look at the
+// entries, so the same advance is never given back, or taken, a second time.
+
+// How much client advance a saved invoice took (its 'credit-applied' payment
+// that came from the client's advance, not from an overpaid earlier bill).
+export const clientAdvanceUsedOn = (bill) =>
+  round2((bill?.payments || [])
+    .filter((p) => p?.mode === 'credit-applied' && p?.creditFrom === 'client-advance')
+    .reduce((s, p) => s + (Number(p.amount) || 0), 0));
+
+// Give back every advance entry this invoice used. The entry moves from
+// advanceApplied[] to advanceReleased[] (with the reason and time), so the
+// balance goes up and the history still shows what happened.
+// Returns { client, released } - released is 0 when there was nothing to give back.
+export async function releaseClientAdvance({ clientName, billId, invoiceNumber, reason = 'invoice removed' }) {
+  const lower = String(clientName || '').trim().toLowerCase();
+  const key = String(billId || invoiceNumber || '');
+  if (!lower || !key) return { client: null, released: 0 };
+  const all = await getAllClients();
+  const client = all.find((c) => String(c.name || '').trim().toLowerCase() === lower);
+  if (!client) return { client: null, released: 0 };
+  const mine = (client.advanceApplied || []).filter((a) => String(a.billId || a.invoiceNumber || '') === key);
+  if (mine.length === 0) return { client, released: 0 };
+  const at = new Date().toISOString();
+  const record = {
+    ...client,
+    advanceApplied: (client.advanceApplied || []).filter((a) => !mine.includes(a)),
+    advanceReleased: [...(client.advanceReleased || []), ...mine.map((a) => ({ ...a, releasedAt: at, reason }))],
+  };
+  record.creditBalance = advanceBalanceOf(record);
+  await saveClient(record);
+  return { client: record, released: sumApplied(mine) };
+}
+
+// Put an invoice's advance back on (Undo cancel, or restoring it from Trash).
+// Takes at most what the client still has, and nothing if the invoice already
+// has an entry. `amount` defaults to what the invoice's own payments say it used.
+export async function reapplyClientAdvance({ bill, amount }) {
+  const want = round2(amount ?? clientAdvanceUsedOn(bill));
+  if (!bill || !(want > 0)) return { client: null, applied: 0 };
+  const before = await getAllClients();
+  const lower = String(bill.clientName || '').trim().toLowerCase();
+  const had = before.find((c) => String(c.name || '').trim().toLowerCase() === lower);
+  const key = String(bill.id || bill.invoiceNumber || '');
+  if (had && (had.advanceApplied || []).some((a) => String(a.billId || a.invoiceNumber || '') === key)) {
+    return { client: had, applied: 0 };
+  }
+  const record = await applyClientAdvance({
+    clientName: bill.clientName, amount: want, billId: bill.id, invoiceNumber: bill.invoiceNumber,
+  });
+  const applied = record ? round2(sumApplied(record.advanceApplied) - sumApplied(had?.advanceApplied)) : 0;
+  return { client: record, applied };
 }
