@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef, useMemo, lazy, Suspense } from 'react';
-import { Home, FileText, Settings, Plus, Users, Package, BarChart3, Wallet, RefreshCw, Receipt, BookOpen, Moon, Sun, Download, X, ShoppingCart, ChevronDown, Building2, Pencil, Search, Command, Bell, Calculator, HardDrive, Menu, History } from 'lucide-react';
+import { Home, FileText, Settings, Plus, Users, Package, BarChart3, Wallet, RefreshCw, Receipt, BookOpen, Moon, Sun, Download, X, ShoppingCart, ChevronDown, Building2, Pencil, Search, Command, Bell, Calculator, HardDrive, Menu, History, Eye } from 'lucide-react';
 import { getAllProfiles, saveProfile, getEnabledModules, getAllBills, getAllProducts, getStockAlertSettings, getAllClients, getLockStatus } from './store';
-import { isModuleEnabled, getUpcomingFilings, countsAsSales, localToday, toLocalIsoDate } from './utils';
+import { isModuleEnabled, getUpcomingFilings, countsAsSales, localToday, toLocalIsoDate, formatCurrency, amountDue, isCancelledBill } from './utils';
+import PrintPreviewModal from './components/PrintPreviewModal';
 // v1.10.4 — Route-level lazy loading. Prior App.jsx synchronously
 // imported all 12 views (~15k LOC combined), so a first-paint on
 // Dashboard downloaded and parsed GSTReturns (1952), InvoiceGenerator
@@ -62,6 +63,8 @@ function InvoiceHistory({ onNew, onEdit, onPrint, onDuplicate }) {
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
+  // View popup: the invoice as it prints, in the same window (no editor, no new tab).
+  const [viewBill, setViewBill] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -73,10 +76,28 @@ function InvoiceHistory({ onNew, onEdit, onPrint, onDuplicate }) {
   }, []);
 
   const billDate = (b) => b.invoiceDate || b.data?.details?.invoiceDate || b.createdAt || '';
+  // Bills are saved with `totalAmount` (older/imported ones may use other names).
   const billAmount = (b) => {
-    const v = b.total ?? b.grandTotal ?? b.amount ?? b.data?.totals?.grandTotal ?? b.data?.grandTotal ?? b.data?.total;
+    const v = b.totalAmount ?? b.data?.totals?.total ?? b.total ?? b.grandTotal ?? b.amount ?? b.data?.totals?.grandTotal ?? b.data?.grandTotal ?? b.data?.total;
     const n = Number(v);
     return v === undefined || v === null || Number.isNaN(n) ? null : n;
+  };
+  // Money already received on the bill: cash payments + advance applied.
+  const billPaid = (b) => {
+    const list = Array.isArray(b.payments) ? b.payments : [];
+    const fromList = list.reduce((s, p) => s + (Number(p?.amount) || 0), 0);
+    const n = Number(b.paidAmount);
+    return Number.isFinite(n) && list.length === 0 ? n : fromList;
+  };
+  // The advance (client credit) that was deducted when the bill was made.
+  const billAdvance = (b) => {
+    const list = Array.isArray(b.payments) ? b.payments : [];
+    const fromPay = list.filter((p) => p?.mode === 'credit-applied').reduce((s, p) => s + (Number(p?.amount) || 0), 0);
+    return fromPay || Number(b.data?.appliedCredit) || 0;
+  };
+  const billBalance = (b) => {
+    if (isCancelledBill(b)) return 0;
+    return Math.round((amountDue(b) - billPaid(b)) * 100) / 100;
   };
   const statusOf = (b) => String(b.status || 'unpaid').toLowerCase();
 
@@ -97,7 +118,7 @@ function InvoiceHistory({ onNew, onEdit, onPrint, onDuplicate }) {
     const dt = new Date(d);
     return Number.isNaN(dt.getTime()) ? String(d) : dt.toLocaleDateString('en-IN');
   };
-  const fmtAmt = (n) => (n === null ? '—' : '₹' + n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+  const fmtAmt = (n, b) => (n === null ? '—' : formatCurrency(n, b?.currency || 'INR'));
 
   const th = { textAlign: 'left', padding: '0.6rem 0.75rem', fontSize: '0.75rem', color: 'var(--text-muted)', borderBottom: '1px solid var(--border-color)', whiteSpace: 'nowrap' };
   const td = { padding: '0.6rem 0.75rem', fontSize: '0.88rem', borderBottom: '1px solid var(--border-color)', color: 'var(--text-primary)' };
@@ -140,6 +161,9 @@ function InvoiceHistory({ onNew, onEdit, onPrint, onDuplicate }) {
                 <th style={th}>Client</th>
                 <th style={th}>Date</th>
                 <th style={{ ...th, textAlign: 'right' }}>Amount</th>
+                <th style={{ ...th, textAlign: 'right' }}>Advance</th>
+                <th style={{ ...th, textAlign: 'right' }}>Paid</th>
+                <th style={{ ...th, textAlign: 'right' }}>Balance</th>
                 <th style={th}>Status</th>
                 <th style={{ ...th, textAlign: 'right' }}>Actions</th>
               </tr>
@@ -150,9 +174,19 @@ function InvoiceHistory({ onNew, onEdit, onPrint, onDuplicate }) {
                   <td style={{ ...td, fontWeight: 600 }}>{b.invoiceNumber || '—'}</td>
                   <td style={td}>{b.clientName || 'No client'}</td>
                   <td style={td}>{fmtDate(billDate(b))}</td>
-                  <td style={{ ...td, textAlign: 'right' }}>{fmtAmt(billAmount(b))}</td>
+                  <td style={{ ...td, textAlign: 'right', fontWeight: 600 }}>{fmtAmt(billAmount(b), b)}</td>
+                  <td style={{ ...td, textAlign: 'right', color: billAdvance(b) > 0.005 ? '#0369a1' : 'var(--text-muted)' }}>
+                    {billAdvance(b) > 0.005 ? '− ' + fmtAmt(billAdvance(b), b) : '—'}
+                  </td>
+                  <td style={{ ...td, textAlign: 'right' }}>{fmtAmt(billPaid(b), b)}</td>
+                  <td style={{ ...td, textAlign: 'right', fontWeight: 600, color: billBalance(b) > 0.005 ? '#dc2626' : '#059669' }}>
+                    {fmtAmt(Math.max(0, billBalance(b)), b)}
+                  </td>
                   <td style={{ ...td, textTransform: 'capitalize' }}>{statusOf(b)}</td>
                   <td style={{ ...td, textAlign: 'right', whiteSpace: 'nowrap' }}>
+                    <button type="button" className="btn btn-primary" style={{ fontSize: '0.78rem', padding: '0.25rem 0.6rem', marginRight: 4, display: 'inline-flex', alignItems: 'center', gap: 4 }} onClick={() => setViewBill(b)} title="View invoice">
+                      <Eye size={13} /> View
+                    </button>
                     <button type="button" className="btn btn-secondary" style={{ fontSize: '0.78rem', padding: '0.25rem 0.6rem', marginRight: 4 }} onClick={() => onEdit(b)}>Open</button>
                     <button type="button" className="btn btn-secondary" style={{ fontSize: '0.78rem', padding: '0.25rem 0.6rem', marginRight: 4 }} onClick={() => onPrint(b)}>Print</button>
                     <button type="button" className="btn btn-secondary" style={{ fontSize: '0.78rem', padding: '0.25rem 0.6rem' }} onClick={() => onDuplicate(b)}>Duplicate</button>
@@ -167,6 +201,25 @@ function InvoiceHistory({ onNew, onEdit, onPrint, onDuplicate }) {
         <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.5rem' }}>
           Showing {rows.length} of {bills.length} invoice{bills.length !== 1 ? 's' : ''}
         </p>
+      )}
+
+      {viewBill?.data && (
+        <PrintPreviewModal
+          isOpen
+          onClose={() => setViewBill(null)}
+          onPrint={() => onPrint(viewBill)}
+          cancelled={isCancelledBill(viewBill)}
+          profile={viewBill.data.profile}
+          client={viewBill.data.client || {}}
+          details={viewBill.data.details || {}}
+          items={viewBill.data.items || []}
+          totals={viewBill.data.totals || {}}
+          invoiceType={viewBill.invoiceType || viewBill.data.invoiceType || 'tax-invoice'}
+          customTerms={viewBill.data.customTerms}
+          customNotes={viewBill.data.customNotes}
+          extraSections={viewBill.data.extraSections || []}
+          invoiceOptions={viewBill.data.invoiceOptions || {}}
+        />
       )}
     </div>
   );
